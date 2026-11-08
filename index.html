@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Bridge Load Test</title>
+  <meta name="description" content="Field app for bridge live-load tests: BDI data, gauges, trucks, load paths, notes, photos and Word reports. Works offline.">
+  <meta name="theme-color" content="#1f4e79">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Load Test">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Bridge Load Test</div>
+    <select id="projectSelect" aria-label="Current test"></select>
+    <button class="btn" id="newProjectBtn">New test</button>
+    <button class="btn ghost" id="menuBtn" aria-haspopup="true">More ▾</button>
+    <div class="menu" id="menu" hidden>
+      <button data-act="rename">Rename test</button>
+      <button data-act="duplicate">Duplicate setup (no data)</button>
+      <button data-act="export">Export backup file</button>
+      <button data-act="import">Import backup file</button>
+      <button data-act="storage">Storage used</button>
+      <button data-act="delete" class="danger">Delete this test</button>
+    </div>
+    <span id="offlineBadge" class="badge" hidden>Offline</span>
+  </header>
+  <nav class="tabs" id="tabs">
+    <button data-tab="bridge">Bridge</button>
+    <button data-tab="gauges">Gauges</button>
+    <button data-tab="vehicles">Vehicles</button>
+    <button data-tab="loadcases">Load paths</button>
+    <button data-tab="passes">Data &amp; plots</button>
+    <button data-tab="log">Field log</button>
+    <button data-tab="report">Report</button>
+  </nav>
+  <main id="main"></main>
+  <div class="quickbar" id="quickbar">
+    <button class="btn primary" id="quickNote">＋ Note</button>
+    <button class="btn primary" id="quickPhoto">📷 Photo</button>
+  </div>
+  <input type="file" id="photoInput" accept="image/*" multiple hidden>
+  <!-- no accept filter: iPadOS greys out .tdms files because it has no file type for them -->
+  <input type="file" id="tdmsInput" multiple hidden>
+  <input type="file" id="backupInput" accept=".json,application/json" hidden>
+  <dialog id="dlg"></dialog>
+  <div id="toast" class="toast" hidden></div>
+  <script src="vendor/docx.umd.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
