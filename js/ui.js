@@ -19,17 +19,27 @@ export function bindForm(root, onChange) {
     if (el.type === 'checkbox') el.checked = !!v;
     else if (el.dataset.type === 'list') el.value = (v || []).join(', ');
     else el.value = v ?? '';
-    const handler = () => {
-      let val;
-      if (el.type === 'checkbox') val = el.checked;
-      else if (el.dataset.type === 'num') val = el.value === '' ? '' : Number(el.value);
-      else if (el.dataset.type === 'list') val = el.value.split(/[,;\s]+/).filter(Boolean).map(Number).filter(x => isFinite(x) && x > 0);
-      else val = el.value;
-      setPath(state.project, path, val);
-      save();
-      if (onChange) onChange(path, val, el);
+    const read = () => {
+      if (el.type === 'checkbox') return el.checked;
+      if (el.dataset.type === 'num') {
+        const t = el.value.trim();
+        if (t === '') return '';
+        const n = Number(t);
+        return isFinite(n) ? n : t; // keep partial entries like "-" or "8." until finished
+      }
+      if (el.dataset.type === 'list') return el.value.split(/[,;\s]+/).filter(Boolean).map(Number).filter(x => isFinite(x) && x > 0);
+      return el.value;
     };
-    el.addEventListener(el.tagName === 'SELECT' || el.type === 'checkbox' ? 'change' : 'input', handler);
+    const store = () => { const val = read(); setPath(state.project, path, val); save(); return val; };
+    if (el.tagName === 'SELECT' || el.type === 'checkbox') {
+      el.addEventListener('change', () => { const val = store(); if (onChange) onChange(path, val, el); });
+    } else {
+      // Save on every keystroke, but only redraw/recalculate when the entry is finished
+      // (Enter, Tab, or tapping elsewhere) so the cursor and decimals are never lost.
+      el.addEventListener('input', store);
+      el.addEventListener('change', () => { const val = store(); if (onChange) onChange(path, val, el); });
+      if (el.tagName === 'INPUT') el.addEventListener('keydown', e => { if (e.key === 'Enter') el.blur(); });
+    }
   });
 }
 

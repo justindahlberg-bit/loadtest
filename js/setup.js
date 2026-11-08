@@ -115,10 +115,12 @@ export function renderGauges(main) {
       <label class="row small muted">Sort <select id="sortBy" style="width:auto">${opts([['order', 'Order #'], ['serial', 'Serial'], ['girder', 'Girder'], ['span', 'Span'], ['section', 'Section'], ['location', 'Location'], ['type', 'Type']], s.sortBy)}</select></label>
       <label class="row small muted">Group <select id="groupBy" style="width:auto">${opts([['none', 'None'], ['girder', 'Girder'], ['span', 'Span'], ['section', 'Section'], ['location', 'Location'], ['type', 'Type']], s.groupBy)}</select></label>
       <button class="btn small" id="renumber">Renumber in this order</button>
+      <button class="btn small primary" id="assignGirders">Assign by girder…</button>
       <button class="btn small" id="autoDist">Pick distribution gauges…</button>
       <button class="btn small" id="addGauge">＋ Gauge</button>
     </div>
     <p class="muted small">Gauges are added automatically when you import a data file. BDI serial numbers are the IDs. Set status to <b>Bad</b> to drop a gauge from plots and results, or use <b>Replaces</b> when a gauge was swapped: the new one takes over the old one's location.</p>
+    <div id="girderNote"></div>
     <div class="table-wrap"><table class="data" id="gaugeTable"></table></div>
   </div>
   <div class="card"><h2>Gauge locations on cross-section</h2><canvas class="diagram" id="xs"></canvas>
@@ -137,7 +139,7 @@ export function renderGauges(main) {
         const bad = ['bad', 'unused', 'removed', 'replaced'].includes(g.status);
         const autoOff = (g.offset === '' || g.offset == null) && isFinite(gaugeOffset(g)) ? gaugeOffset(g) : '';
         html += `<tr class="${bad ? 'bad' : ''}">
-          <td style="width:60px"><input data-bind="gauges.${i}.order" data-type="num" inputmode="numeric" style="width:56px"></td>
+          <td style="white-space:nowrap">${s.sortBy === 'order' ? `<button class="btn small" data-mv="${i}:-1" title="Move up" aria-label="Move up">▲</button><button class="btn small" data-mv="${i}:1" title="Move down" aria-label="Move down">▼</button> ` : ''}<input data-bind="gauges.${i}.order" data-type="num" inputmode="numeric" style="width:52px"></td>
           <td><b>${esc(g.serial)}</b></td>
           <td><span class="pill ${isDefl(g) ? 'disp' : isStrain(g) ? 'strain' : ''}">${esc(isDefl(g) ? 'Deflection' : isStrain(g) ? 'Strain' : g.type)}</span></td>
           <td><input data-bind="gauges.${i}.label" style="width:80px" placeholder="e.g. 7"></td>
@@ -156,7 +158,23 @@ export function renderGauges(main) {
     html += `</tbody>`;
     const sections = [...new Set(p.gauges.map(g => g.section).filter(Boolean)), 'Midspan', 'Near support', 'Quarter span'];
     table.innerHTML = html + `<datalist id="sectionList">${[...new Set(sections)].map(x => `<option value="${esc(x)}">`).join('')}</datalist>`;
-    bindForm(table, (path) => { if (/status|girder|offset|location/.test(path)) { if (/status/.test(path)) render(); drawXS($('#xs'), { loadCases: [] }); } });
+    bindForm(table, (path) => { if (/status|girder|offset|location|order/.test(path)) { if (/status|order/.test(path)) render(); drawXS($('#xs'), { loadCases: [] }); } });
+    $$('[data-mv]', table).forEach(b => b.onclick = () => {
+      const [i, dir] = b.dataset.mv.split(':').map(Number);
+      const sorted = sortGauges(p.gauges, 'order');
+      sorted.forEach((g, k) => { g.order = k + 1; }); // make the numbering clean first
+      const k = sorted.indexOf(p.gauges[i]), j = k + dir;
+      if (j < 0 || j >= sorted.length) return;
+      [sorted[k].order, sorted[j].order] = [sorted[j].order, sorted[k].order];
+      save(); render();
+    });
+    const note = $('#girderNote');
+    if (p.bridge.type !== 'slab' && !(p.bridge.girders || []).length) {
+      note.innerHTML = `<div class="warn-box">No girder lines yet, so the <b>Girder</b> column is empty. <button class="btn small" id="goBridge">Set up girder lines</button> on the Bridge tab (or use <b>Generate evenly spaced…</b> there), then come back and use <b>Assign by girder…</b>.</div>`;
+      $('#goBridge').onclick = () => document.querySelector('[data-tab=bridge]').click();
+    } else if (p.bridge.type === 'slab') {
+      note.innerHTML = `<p class="muted small">Slab bridge: enter each gauge's <b>Offset</b> from ${esc(p.bridge.edgeA || 'Edge A')} so the distribution plot can place it across the deck.</p>`;
+    } else note.innerHTML = '';
     $$('[data-replaces]', table).forEach(sel => sel.onchange = () => {
       const g = p.gauges[Number(sel.dataset.replaces)];
       g.replaces = sel.value;
@@ -180,6 +198,69 @@ export function renderGauges(main) {
     if (p.gauges.find(g => g.serial === r.s)) { toast('That serial already exists'); return; }
     p.gauges.push({ serial: r.s, type: r.t, unit: r.t === 'Strain' ? 'ue' : 'in', label: '', span: '', girder: '', section: '', location: '', offset: '', dist: false, status: 'ok', replaces: '', notes: '', order: p.gauges.length + 1 });
     save(); render();
+  };
+  $('#assignGirders').onclick = async () => {
+    const girders = p.bridge.girders || [];
+    if (p.bridge.type === 'slab' || !girders.length) {
+      toast(p.bridge.type === 'slab' ? 'Slab bridge – enter gauge offsets in the table instead' : 'Set up girder lines on the Bridge tab first');
+      return;
+    }
+    const sec0 = p.bridge.distSection || 'Midspan';
+    const usable = g => !['unused', 'removed', 'replaced'].includes(g.status);
+    const strain = sortGauges(p.gauges.filter(g => isStrain(g) && usable(g)), 'serial');
+    const defl = sortGauges(p.gauges.filter(g => isDefl(g) && usable(g)), 'serial');
+    const label = g => g.serial + (g.girder && g.section ? `  (now ${g.girder} ${g.location || ''})` : '');
+    const current = (gname, loc, list, sec) => (list.find(g => g.girder === gname && g.location === loc && (g.section || '') === sec) || {}).serial || '';
+    const rowsHtml = sec => girders.map((gd, k) => `<tr><td><b>${esc(gd.name)}</b><div class="muted small">${ftin(Number(gd.offset))}</div></td>
+      <td><select data-role="Bottom" data-k="${k}">${opts([['', '—'], ...strain.map(g => [g.serial, label(g)])], current(gd.name, 'Bottom', strain, sec))}</select></td>
+      <td><select data-role="Top" data-k="${k}">${opts([['', '—'], ...strain.map(g => [g.serial, label(g)])], current(gd.name, 'Top', strain, sec))}</select></td>
+      <td><select data-role="Defl" data-k="${k}">${opts([['', '—'], ...defl.map(g => [g.serial, label(g)])], (defl.find(g => g.girder === gd.name && (g.section || '') === sec) || {}).serial || '')}</select></td></tr>`).join('');
+    const r = await dialog({
+      title: 'Assign gauges to girders',
+      body: `<p class="muted small">Pick the gauge on each girder at one cross-section. Bottom gauges become the load distribution gauges, and the gauge order follows the girders (${esc(girders[0].name)} first). Run this again for other sections.</p>
+        <div class="grid"><label>Section<input name="sec" value="${esc(sec0)}" list="secList2"><datalist id="secList2">${[...new Set([sec0, 'Midspan', 'Near support', 'Quarter span', ...p.gauges.map(g => g.section).filter(Boolean)])].map(x => `<option value="${esc(x)}">`).join('')}</datalist></label>
+        <label>Span<input name="span" value="1" inputmode="numeric"></label></div>
+        <div class="table-wrap" style="margin-top:10px"><table class="data"><thead><tr><th>Girder</th><th>Bottom strain</th><th>Top strain</th><th>Deflection</th></tr></thead><tbody id="asgRows">${rowsHtml(sec0)}</tbody></table></div>`,
+      buttons: [{ label: 'Cancel', value: null }, {
+        label: 'Assign', primary: true, value: d => ({
+          sec: $('[name=sec]', d).value.trim() || 'Midspan', span: $('[name=span]', d).value.trim(),
+          picks: $$('[data-role]', d).map(sel => ({ role: sel.dataset.role, k: Number(sel.dataset.k), serial: sel.value })),
+        }),
+      }],
+      validate: d => {
+        const chosen = $$('[data-role]', d).map(s => s.value).filter(Boolean);
+        const dup = chosen.find((v, i) => chosen.indexOf(v) !== i);
+        return dup ? `${dup} is picked twice` : null;
+      },
+      onOpen: d => { $('[name=sec]', d).addEventListener('change', e => { $('#asgRows', d).innerHTML = rowsHtml(e.target.value.trim()); }); },
+    });
+    if (!r) return;
+    const chosen = new Set(r.picks.map(x => x.serial).filter(Boolean));
+    // Clear gauges previously assigned at this section but no longer picked
+    p.gauges.forEach(g => {
+      if ((g.section || '') === r.sec && g.girder && !chosen.has(g.serial)) {
+        const wasPicked = r.picks.some(x => girders[x.k].name === g.girder && (x.role === 'Defl' ? isDefl(g) : x.role === g.location));
+        if (wasPicked) { g.girder = ''; g.dist = false; }
+      }
+    });
+    let order = 0;
+    const assigned = [];
+    for (const role of ['Bottom', 'Top', 'Defl']) {
+      for (const x of r.picks.filter(q => q.role === role && q.serial).sort((a, b) => a.k - b.k)) {
+        const g = p.gauges.find(q => q.serial === x.serial); if (!g) continue;
+        Object.assign(g, { girder: girders[x.k].name, section: r.sec, span: r.span, location: role === 'Defl' ? 'Bottom' : role, offset: '', dist: role === 'Bottom' && isStrain(g) });
+        assigned.push(g);
+      }
+    }
+    // Order: girder by girder (bottom then top), then deflections, then everything else
+    const gi = name => girders.findIndex(gd => gd.name === name);
+    assigned.sort((a, b) => (isDefl(a) - isDefl(b)) || gi(a.girder) - gi(b.girder) || (a.location === 'Top') - (b.location === 'Top'));
+    const rest = sortGauges(p.gauges.filter(g => !assigned.includes(g)), 'order');
+    [...assigned, ...rest].forEach(g => { g.order = ++order; });
+    p.bridge.distSection = r.sec;
+    s.sortBy = 'order'; $('#sortBy').value = 'order';
+    save(); render(); drawXS($('#xs'), { loadCases: [] });
+    toast(`${assigned.length} gauges assigned at ${r.sec}`);
   };
   $('#autoDist').onclick = async () => {
     const sections = [...new Set(p.gauges.map(g => g.section).filter(Boolean))];

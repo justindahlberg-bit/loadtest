@@ -1,6 +1,6 @@
 // Offline support: cache the app shell, serve from cache, refresh in the background.
 // Bump VERSION whenever app files change so devices pick up the update.
-const VERSION = 'loadtest-v1';
+const VERSION = 'loadtest-v2';
 const FILES = [
   './', './index.html', './styles.css', './manifest.webmanifest',
   './js/app.js', './js/state.js', './js/ui.js', './js/db.js', './js/tdms.js', './js/calc.js',

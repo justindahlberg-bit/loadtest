@@ -3,7 +3,8 @@ import { state, save, uid, getPassData, registerChannels, gaugeOffset, groupKey,
 import { db } from './db.js';
 import { parseTdms, toPass } from './tdms.js';
 import { zeroChannel, vehicleWindows, positionAt, indexRange, channelPeaks, distribution, speedMph, bridgeLength, fmt, ftin } from './calc.js';
-import { PlotView, seriesStyle } from './plot.js';
+import { PlotView, seriesStyle, PALETTE } from './plot.js';
+import { drawDistribution, drawInto } from './draw.js';
 import { esc, $, $$, bindForm, opts, dialog, confirmDlg, toast, saveFile, fmtTime } from './ui.js';
 
 const P = () => state.project;
@@ -328,10 +329,23 @@ export function buildSpec(pass, r, v, opt = {}) {
   return { x, series, xLabel, yLabel, vlines, vbands, title };
 }
 
+// Series for the distribution-vs-cross-section plot (one per vehicle)
+export function distSeries(pass, r) {
+  const lc = loadCaseById(pass.loadCaseId);
+  return r.results.map((res, i) => res.dist ? { name: res.vehicle ? res.vehicle.name : `Vehicle ${i + 1}`, color: PALETTE[i % PALETTE.length], rows: res.dist.rows, loadCase: lc } : null).filter(Boolean);
+}
+
 function renderResults(pass, r) {
   const p = P(), host = $('#results'); if (!host) return;
   const unit = p.settings.stressUnit, k = r.E * 1e-6 * (unit === 'psi' ? 1000 : 1);
-  host.innerHTML = r.results.map((res, vi) => {
+  const series = distSeries(pass, r);
+  const missing = series.length ? series[0].rows.filter(x => !isFinite(x.offset)).map(x => x.name) : [];
+  const distCard = series.length ? `<div class="card"><div class="row"><h2 style="margin:0">Load distribution across the bridge</h2><span class="spacer"></span>
+      <select id="distMetric" style="width:auto">${opts([['df', 'Distribution (%)'], ['strain', 'Strain at peak (µε)']], view.distMetric || 'df')}</select></div>
+      <p class="muted small">Each vehicle's distribution at its peak, plotted at the gauge positions over the ${p.bridge.type === 'slab' ? 'slab' : 'girders'}${loadCaseById(pass.loadCaseId) ? `, with the ${esc(loadCaseById(pass.loadCaseId).name)} wheel lines` : ''}.</p>
+      ${missing.length ? `<p class="warn-box">Not plotted (no girder or offset): ${esc(missing.join(', '))}. Set them on the Gauges tab.</p>` : ''}
+      <canvas class="diagram" id="distCanvas"></canvas></div>` : '';
+  host.innerHTML = distCard + r.results.map((res, vi) => {
     const vname = res.vehicle ? res.vehicle.name : `Vehicle ${vi + 1}`;
     const d = res.dist;
     let distHtml = '';
@@ -354,6 +368,11 @@ function renderResults(pass, r) {
       ${deflG.length ? `<div class="table-wrap"><table class="data"><thead><tr><th>Deflection</th><th>Location</th><th class="num">Max (in)</th><th class="num">t (s)</th><th class="num">x (ft)</th><th class="num">Min (in)</th><th class="num">t (s)</th></tr></thead><tbody>${deflG.map(g => pkRow(g, true)).join('')}</tbody></table></div>` : ''}
       </details></div>`;
   }).join('');
+  if (series.length) {
+    const drawD = () => drawInto($('#distCanvas'), 380, (ctx, w, h, theme) => drawDistribution(ctx, w, h, p, series, { theme, metric: view.distMetric || 'df' }));
+    $('#distMetric').onchange = e => { view.distMetric = e.target.value; drawD(); };
+    requestAnimationFrame(drawD);
+  }
 }
 
 function renderPassLog(pass) {

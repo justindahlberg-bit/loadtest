@@ -1,9 +1,9 @@
 // Word (.docx) report generator. Uses the docx library loaded as window.docx.
 import { state, getPassData, gaugeOffset, groupKey, sortGauges, isStrain, isDefl, gaugeName, loadCaseById, vehicleById, shortSerial } from './state.js';
 import { db } from './db.js';
-import { processPass, buildSpec, passStart, passLabel } from './passes.js';
-import { plotPng } from './plot.js';
-import { drawCrossSection, drawTruck, canvasPng, loadCaseWheels } from './draw.js';
+import { processPass, buildSpec, passStart, passLabel, distSeries } from './passes.js';
+import { plotPng, PALETTE } from './plot.js';
+import { drawCrossSection, drawTruck, canvasPng, loadCaseWheels, drawDistribution } from './draw.js';
 import { fmt, ftin, bridgeLength } from './calc.js';
 
 export const REPORT_SECTIONS = [
@@ -217,6 +217,12 @@ export async function buildReport(onProgress = () => { }) {
           children.push(table(['Transducer', 'Location', 'Max (in)', 'Min (in)'], dRows, [2, 3]));
         }
       }
+      const ds = distSeries(pass, r);
+      if (ds.length && ds[0].rows.some(x => isFinite(x.offset))) {
+        const dh = 900;
+        const png = await canvasPng((ctx, w, h) => drawDistribution(ctx, w, h, p, ds, { metric: 'df', fontScale: 2.4 }), 1800, dh);
+        children.push(spacer(), image(png, 620, Math.round(620 * dh / 1800)), caption('Figure', `${passLabel(pass)}: load distribution across the ${br.type === 'slab' ? 'slab' : 'girders'} at ${br.distSection || 'section'}${ds.length > 1 ? ' for each vehicle' : ''}`));
+      }
     }
   }
 
@@ -256,6 +262,19 @@ export async function buildReport(onProgress = () => { }) {
       children.push(caption('Table', br.type === 'slab' ? 'Load distribution (%) and equivalent strip width for each pass and vehicle' : 'Girder load distribution (%) for each pass and vehicle'));
       const head = ['Pass', 'Vehicle', ...distCols, ...(br.type === 'slab' ? ['Strip width (ft)'] : [])];
       children.push(table(head, distRows.map(r => r.concat(Array(Math.max(0, head.length - r.length)).fill(''))).map(r => r.slice(0, head.length)), head.map((_, i) => i).filter(i => i >= 2)));
+      // One overlay figure per load case (all passes and vehicles in that load case)
+      for (const lc of p.loadCases) {
+        const ser = [];
+        const lcRuns = allResults.filter(x => x.pass.loadCaseId === lc.id);
+        if (lcRuns.length < 2) continue; // a single pass already has its own figure in the results
+        for (const { pass, r } of lcRuns) {
+          for (const s of distSeries(pass, r)) ser.push({ ...s, name: `${pass.name}${r.results.length > 1 ? ' – ' + s.name : ''}`, color: PALETTE[ser.length % PALETTE.length] });
+        }
+        if (ser.length < 2 || !ser[0].rows.some(x => isFinite(x.offset))) continue;
+        const dh = 1000;
+        const png = await canvasPng((ctx, w, h) => drawDistribution(ctx, w, h, p, ser, { metric: 'df', fontScale: 2.4 }), 1800, dh);
+        children.push(spacer(), image(png, 620, Math.round(620 * dh / 1800)), caption('Figure', `${lc.name}${lc.description ? ' (' + lc.description + ')' : ''}: load distribution, all passes`));
+      }
     }
     // Dynamic amplification
     const dynRows = [];
