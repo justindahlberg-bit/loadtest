@@ -4,7 +4,11 @@ An offline field app for bridge live-load tests with BDI strain gauges and defle
 It runs in Safari on an iPad (or any browser) and needs no internet once it is installed.
 
 - Imports BDI STS-Live **.tdms** files directly, one file per pass. No Excel add-in step.
-- Gauge map keyed by BDI serial number: span, girder, section, top/bottom, transverse offset. Sort and group by any of these. Mark bad gauges, or record a swapped gauge with **Replaces**.
+- Works for any bridge: slab, girder or other; any number of spans, girders and gauges; any material (E is editable).
+- Transverse positions measured either from an edge of the deck or left/right of the roadway centerline (e.g. `8 L`, `CL`, `2.5 R`), chosen per test.
+- Gauge map: plan positions before the test (**＋ Gauge line…**), type serials as gauges go on (short form like `2944` is fine), and imported files link to them automatically. Span, girder, section, distance along the bridge, top/bottom, planned and measured positions. Sort and group by any of these. Mark bad gauges, or record a swapped gauge with **Replaces**. **Assign by girder…** for girder bridges.
+- Run plan: plan every run, tap **Start/Stop** in the field, and imported files are matched to their run and load path by time.
+- Setup checklist with time stamps, and custom fields for any extra bridge or test information.
 - Linear drift zeroing between the first and last readings.
 - Truck position from the marks recorded in the file (first mark position plus spacing, or a list of mark positions). Without marks, enter or tap the times the truck enters and leaves the bridge.
 - Strain/stress/deflection plotted against time or truck position. Drag to zoom, tap to read values.
