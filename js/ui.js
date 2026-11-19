@@ -1,5 +1,6 @@
 // Small UI helpers: escaping, data-bind forms, dialogs, toasts, downloads.
 import { state, save } from './state.js';
+import { isCL, parsePos, fmtPos, parseLen } from './calc.js';
 
 export const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 export const $ = (sel, root = document) => root.querySelector(sel);
@@ -16,9 +17,15 @@ export function bindForm(root, onChange) {
   $$('[data-bind]', root).forEach(el => {
     const path = el.dataset.bind;
     const v = getPath(state.project, path);
-    if (el.type === 'checkbox') el.checked = !!v;
-    else if (el.dataset.type === 'list') el.value = (v || []).join(', ');
-    else el.value = v ?? '';
+    const show = val => {
+      if (el.type === 'checkbox') el.checked = !!val;
+      else if (el.dataset.type === 'list') el.value = (val || []).join(', ');
+      else if (el.dataset.type === 'pos') el.value = typeof val === 'number' ? fmtPos(state.project, val) : (val ?? '');
+      else el.value = val ?? '';
+    };
+    show(v);
+    if (el.dataset.type === 'pos' && !el.placeholder) el.placeholder = isCL(state.project) ? 'e.g. 8 L, CL, 2.5 R' : 'ft';
+    if (el.dataset.type === 'len' && !el.placeholder) el.placeholder = `in or ft-in`;
     const read = () => {
       if (el.type === 'checkbox') return el.checked;
       if (el.dataset.type === 'num') {
@@ -28,6 +35,16 @@ export function bindForm(root, onChange) {
         return isFinite(n) ? n : t; // keep partial entries like "-" or "8." until finished
       }
       if (el.dataset.type === 'list') return el.value.split(/[,;\s]+/).filter(Boolean).map(Number).filter(x => isFinite(x) && x > 0);
+      if (el.dataset.type === 'pos') {
+        const t = el.value.trim();
+        if (t === '') return '';
+        const n = isCL(state.project) ? parsePos(t) : Number(t);
+        return isFinite(n) ? n : t;
+      }
+      if (el.dataset.type === 'len') {
+        const n = parseLen(el.value);
+        return n === '' ? '' : isFinite(n) ? n : el.value.trim();
+      }
       return el.value;
     };
     const store = () => { const val = read(); setPath(state.project, path, val); save(); return val; };
@@ -37,7 +54,14 @@ export function bindForm(root, onChange) {
       // Save on every keystroke, but only redraw/recalculate when the entry is finished
       // (Enter, Tab, or tapping elsewhere) so the cursor and decimals are never lost.
       el.addEventListener('input', store);
-      el.addEventListener('change', () => { const val = store(); if (onChange) onChange(path, val, el); });
+      el.addEventListener('change', () => {
+        const val = store();
+        if (el.dataset.type === 'pos' || el.dataset.type === 'len') {
+          show(val); // tidy the display, e.g. "16l" → "16 L", 19'-8" → 236
+          if (typeof val === 'string' && val) toast(el.dataset.type === 'pos' ? `“${val}” isn't a position – use e.g. 8 L, CL or 2.5 R` : `“${val}” isn't a length – use inches (236) or ft-in (19'-8")`);
+        }
+        if (onChange) onChange(path, val, el);
+      });
       if (el.tagName === 'INPUT') el.addEventListener('keydown', e => { if (e.key === 'Enter') el.blur(); });
     }
   });

@@ -1,6 +1,14 @@
 // Diagrams: bridge cross-section with gauges and load paths, and load-vehicle plan view.
 import { PALETTE, niceTicks } from './plot.js';
-import { ftin } from './calc.js';
+import { ftin, toEdge, isCL, clPos, fmtPos, parsePosList } from './calc.js';
+
+// Deck width (ft, out-to-out) for drawing, falling back to the girder/gauge layout
+function deckWidthFor(project, extra = []) {
+  const br = project.bridge;
+  if (Number(br.deckWidth) > 0) return Number(br.deckWidth);
+  const xs = [...(br.girders || []).map(g => toEdge(project, g.offset)), ...extra].filter(isFinite);
+  return Math.max(30, ...xs.map(x => x + 3));
+}
 
 const LIGHT = { bg: '#ffffff', fg: '#1d2430', muted: '#5b6573', deck: '#c9ced6', steel: '#7b8594', wheel: '#1d2430', accent: '#1f6fb4' };
 
@@ -10,11 +18,12 @@ export function diagramTheme() {
   return { bg: v('--plot-bg', LIGHT.bg), fg: v('--fg', LIGHT.fg), muted: v('--muted', LIGHT.muted), deck: v('--deck', LIGHT.deck), steel: v('--steel', LIGHT.steel), wheel: v('--fg', LIGHT.wheel), accent: v('--accent', LIGHT.accent) };
 }
 
-// Vehicle wheel-line positions (ft from Edge A) for a load case
+// Vehicle wheel-line positions for a load case, in the test's own position datum
+// (ft from Edge A, or ft L(−)/R(+) of the centerline). "A" is the Edge A / left side.
 export function loadCaseWheels(lc, vehicle) {
   const ax = (vehicle && vehicle.axles) || [];
   const track = Math.max(...ax.map(a => Number(a.track) || 0), 72) / 12; // ft, c/c of tires
-  const tire = Math.max(...ax.map(a => (Number(a.tireWidth) || 10) * (a.dual ? 2.3 : 1)), 10) / 12;
+  const tire = Math.max(...ax.map(a => a.dual ? (Number(a.dualOut) || (Number(a.tireWidth) || 10) * 2.3) : (Number(a.tireWidth) || 10)), 10) / 12;
   const off = Number(lc.offset) || 0;
   let c;
   switch (lc.ref) {
@@ -33,16 +42,19 @@ export function drawCrossSection(ctx, w, h, project, opt = {}) {
   const f = px => `${Math.round(px * s)}px -apple-system, "Segoe UI", Roboto, Arial, sans-serif`;
   ctx.save();
   ctx.fillStyle = th.bg; ctx.fillRect(0, 0, w, h);
-  const width = Number(br.deckWidth) || Math.max(30, ...(br.girders || []).map(g => Number(g.offset) + 3));
+  const E = v => toEdge(project, v);
+  const width = deckWidthFor(project, (opt.gauges || []).map(g => E(g.offset)));
   const lcs = opt.loadCases || project.loadCases || [];
   const pad = 40 * s;
   const kx = (w - 2 * pad) / width;
   const X = ft => pad + ft * kx;
+  const XD = v => X(E(v)); // position in the test's datum → pixels
   const rowH = 30 * s;
   const lcTop = 16 * s;
   const deckY = lcTop + Math.max(1, lcs.length) * rowH + 24 * s;
   const deckT = Math.max(8 * s, Math.min(18 * s, 0.75 * kx));
-  const girderH = br.type === 'slab' ? 0 : Math.max(36 * s, Math.min(70 * s, (h - deckY) * 0.4));
+  const hasGirders = br.type === 'girder' && (br.girders || []).length > 0;
+  const girderH = !hasGirders ? 0 : Math.max(36 * s, Math.min(70 * s, (h - deckY) * 0.4));
 
   // Load cases (above deck)
   ctx.textBaseline = 'middle';
@@ -53,37 +65,44 @@ export function drawCrossSection(ctx, w, h, project, opt = {}) {
     const col = PALETTE[i % PALETTE.length];
     ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1.5 * s;
     // axle line and tires
-    ctx.beginPath(); ctx.moveTo(X(wpos.a), y); ctx.lineTo(X(wpos.b), y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(XD(wpos.a), y); ctx.lineTo(XD(wpos.b), y); ctx.stroke();
     for (const wx of [wpos.a, wpos.b]) {
       const tw = Math.max(4 * s, wpos.tire * kx);
-      ctx.fillRect(X(wx) - tw / 2, y - 8 * s, tw, 16 * s);
+      ctx.fillRect(XD(wx) - tw / 2, y - 8 * s, tw, 16 * s);
     }
-    // centerline arrow down to deck
-    ctx.setLineDash([4 * s, 3 * s]); ctx.beginPath(); ctx.moveTo(X(wpos.center), y + 9 * s); ctx.lineTo(X(wpos.center), deckY - 3 * s); ctx.stroke(); ctx.setLineDash([]);
+    // vehicle centerline arrow down to deck
+    ctx.setLineDash([4 * s, 3 * s]); ctx.beginPath(); ctx.moveTo(XD(wpos.center), y + 9 * s); ctx.lineTo(XD(wpos.center), deckY - 3 * s); ctx.stroke(); ctx.setLineDash([]);
     const half = Math.max(4 * s, wpos.tire * kx) / 2 + 8 * s;
-    ctx.font = 'bold ' + f(12); ctx.textAlign = X(wpos.b) + half + 150 * s < w ? 'left' : 'right';
-    const lx = ctx.textAlign === 'left' ? X(wpos.b) + half : X(wpos.a) - half;
-    ctx.fillText(`${lc.name || 'LC' + (i + 1)}  ${ftin(wpos.center)} to C/L`, lx, y);
+    ctx.font = 'bold ' + f(12); ctx.textAlign = XD(wpos.b) + half + 170 * s < w ? 'left' : 'right';
+    const lx = ctx.textAlign === 'left' ? XD(wpos.b) + half : XD(wpos.a) - half;
+    const where = isCL(project) ? `wheels ${fmtPos(project, wpos.a, 1)} / ${fmtPos(project, wpos.b, 1)}` : `${ftin(wpos.center)} to C/L`;
+    ctx.fillText(`${lc.name || 'LC' + (i + 1)}  ${where}`, lx, y);
   });
 
   // Deck
   ctx.fillStyle = th.deck; ctx.fillRect(X(0), deckY, width * kx, deckT);
   ctx.strokeStyle = th.fg; ctx.lineWidth = 1 * s; ctx.strokeRect(X(0), deckY, width * kx, deckT);
   // Barriers at curb lines
-  const curbA = Number(br.curbA) || 0, curbB = br.curbB !== '' && br.curbB != null ? Number(br.curbB) : width;
+  const cA = E(br.curbA), cB = E(br.curbB);
+  const curbA = isFinite(cA) ? cA : 0, curbB = isFinite(cB) ? cB : width;
   ctx.fillStyle = th.steel;
   if (curbA > 0.1) ctx.fillRect(X(0), deckY - 14 * s, Math.max(3 * s, curbA * kx), 14 * s);
   if (curbB < width - 0.1) ctx.fillRect(X(curbB), deckY - 14 * s, Math.max(3 * s, (width - curbB) * kx), 14 * s);
   // Lane lines
   ctx.fillStyle = '#d4a017';
-  for (const ll of String(br.laneLines || '').split(/[,\s;]+/).map(Number).filter(isFinite)) {
-    ctx.fillRect(X(ll) - 2 * s, deckY - 3 * s, 4 * s, 3 * s);
+  for (const ll of parsePosList(project, br.laneLines)) ctx.fillRect(XD(ll) - 2 * s, deckY - 3 * s, 4 * s, 3 * s);
+  // Roadway centerline (when positions are measured from it)
+  if (isCL(project)) {
+    const cx = X(clPos(project));
+    ctx.strokeStyle = th.fg; ctx.setLineDash([6 * s, 3 * s, 1.5 * s, 3 * s]); ctx.lineWidth = 1 * s;
+    ctx.beginPath(); ctx.moveTo(cx, deckY - 18 * s); ctx.lineTo(cx, deckY + deckT + girderH + 8 * s); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = th.fg; ctx.font = 'bold ' + f(11); ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillText('CL', cx, deckY - 19 * s);
   }
   // Girders
-  const girders = br.type === 'slab' ? [] : (br.girders || []);
+  const girders = hasGirders ? br.girders : [];
   ctx.font = f(11); ctx.textAlign = 'center';
   for (const g of girders) {
-    const gx = X(Number(g.offset));
+    const gx = XD(g.offset);
     const fw = Math.max(8 * s, Math.min(26 * s, 1.2 * kx));
     const top = deckY + deckT, bot = top + girderH;
     ctx.fillStyle = th.steel;
@@ -96,15 +115,16 @@ export function drawCrossSection(ctx, w, h, project, opt = {}) {
   // Gauges
   const gauges = opt.gauges || [];
   const yFor = loc => {
-    if (br.type === 'slab') return deckY + deckT + 4 * s;
-    if (loc === 'Top') return deckY + deckT + 6 * s;
+    if (/deck/i.test(loc || '')) return deckY - 4 * s;
+    if (!hasGirders) return /top/i.test(loc || '') ? deckY + 3 * s : deckY + deckT + 4 * s;
+    if (/top/i.test(loc || '')) return deckY + deckT + 6 * s;
     if (loc === 'Web') return deckY + deckT + girderH / 2;
     return deckY + deckT + girderH - 2 * s;
   };
   const labelRowBase = deckY + deckT + girderH + 22 * s;
   gauges.forEach(gg => {
-    if (!isFinite(gg.offset)) return;
-    const gx = X(gg.offset), gy = yFor(gg.location);
+    if (!isFinite(E(gg.offset))) return;
+    const gx = XD(gg.offset), gy = yFor(gg.location);
     const isDefl = /displ/i.test(gg.type);
     ctx.fillStyle = isDefl ? '#d62728' : th.accent;
     ctx.beginPath();
@@ -115,12 +135,12 @@ export function drawCrossSection(ctx, w, h, project, opt = {}) {
   // gauge labels: stacked under each offset
   if (opt.labels !== false) {
     const byX = new Map();
-    gauges.forEach(gg => { if (!isFinite(gg.offset)) return; const k = Math.round(gg.offset * 10); if (!byX.has(k)) byX.set(k, []); byX.get(k).push(gg); });
+    gauges.forEach(gg => { const x = E(gg.offset); if (!isFinite(x)) return; const k = Math.round(x * 10); if (!byX.has(k)) byX.set(k, []); byX.get(k).push(gg); });
     ctx.font = f(10); ctx.textBaseline = 'top'; ctx.textAlign = 'center';
     for (const list of byX.values()) {
       list.forEach((gg, k) => {
         ctx.fillStyle = /displ/i.test(gg.type) ? '#d62728' : th.muted;
-        ctx.fillText(gg.short || gg.serial, X(gg.offset), labelRowBase + k * 12 * s);
+        ctx.fillText(gg.short || gg.serial, XD(gg.offset), labelRowBase + k * 12 * s);
       });
     }
   }
@@ -132,6 +152,9 @@ export function drawCrossSection(ctx, w, h, project, opt = {}) {
   ctx.restore();
 }
 
+// Height (CSS px at scale 1) that fits a cross-section drawing
+export const crossSectionHeight = (project, nLc) => 190 + Math.max(1, nLc) * 30 + (project.bridge.type === 'girder' && (project.bridge.girders || []).length ? 80 : 0);
+
 export function drawTruck(ctx, w, h, veh, opt = {}) {
   const th = opt.theme || LIGHT, s = opt.fontScale || 1;
   const f = px => `${Math.round(px * s)}px -apple-system, "Segoe UI", Roboto, Arial, sans-serif`;
@@ -142,7 +165,8 @@ export function drawTruck(ctx, w, h, veh, opt = {}) {
   const xs = []; let acc = 0;
   ax.forEach((a, i) => { if (i > 0) acc += a.spacing; xs.push(acc); });
   const L = acc || 1;
-  const maxTrack = Math.max(...ax.map(a => a.track + a.tireWidth * (a.dual ? 2.3 : 1)));
+  const setW = a => a.dual ? (Number(a.dualOut) || a.tireWidth * 2.3) : a.tireWidth; // width of one wheel set
+  const maxTrack = Math.max(...ax.map(a => a.track + setW(a)));
   const padX = 70 * s, padTop = 34 * s, padBot = 70 * s;
   const k = Math.min((w - 2 * padX) / Math.max(L, 60), (h - padTop - padBot) / maxTrack);
   const ox = (w - L * k) / 2, cy = padTop + (h - padTop - padBot) / 2;
@@ -161,7 +185,8 @@ export function drawTruck(ctx, w, h, veh, opt = {}) {
       const n = a.dual ? 2 : 1;
       for (let d = 0; d < n; d++) {
         const tw = a.tireWidth * k;
-        const yc = a.dual ? Y(side * a.track / 2) + (d === 0 ? -1 : 1) * (tw * 0.6) : Y(side * a.track / 2);
+        const half = (setW(a) - a.tireWidth) / 2; // dual tires: centers sit half the set width minus half a tire from the set center
+        const yc = a.dual ? Y(side * a.track / 2 + (d === 0 ? -1 : 1) * half) : Y(side * a.track / 2);
         ctx.fillRect(x - tl / 2, yc - tw / 2, tl, tw);
       }
     }
@@ -200,11 +225,12 @@ export function drawDistribution(ctx, w, h, project, series, opt = {}) {
   const f = px => `${Math.round(px * s)}px -apple-system, "Segoe UI", Roboto, Arial, sans-serif`;
   ctx.save();
   ctx.fillStyle = th.bg; ctx.fillRect(0, 0, w, h);
-  const girders = br.type === 'slab' ? [] : (br.girders || []);
-  const offs = series.flatMap(se => se.rows.map(r => r.offset)).filter(isFinite);
-  const width = Number(br.deckWidth) || Math.max(20, ...offs.map(o => o + 3), ...girders.map(g => Number(g.offset) + 3));
+  const girders = br.type === 'girder' ? (br.girders || []) : [];
+  const offs = series.flatMap(se => se.rows.map(r => r.offset)).filter(v => isFinite(toEdge(project, v)));
+  const width = deckWidthFor(project, offs.map(o => toEdge(project, o)));
   const L = 62 * s, R = 16 * s;
   const kx = (w - L - R) / width, X = ft => L + ft * kx;
+  const XD = v => X(toEdge(project, v));
   const legendH = series.length > 1 || opt.title ? 22 * s * Math.ceil(series.length / Math.max(1, Math.floor((w - L) / (170 * s)))) : 0;
   const T = 12 * s + legendH + (opt.title ? 18 * s : 0);
   const xsH = (girders.length ? 92 : 46) * s;
@@ -241,17 +267,17 @@ export function drawDistribution(ctx, w, h, project, series, opt = {}) {
   // girder guide lines from plot down to the girders
   const deckY = h - xsH - 10 * s;
   ctx.setLineDash([3 * s, 4 * s]); ctx.strokeStyle = th.muted; ctx.globalAlpha = 0.45;
-  for (const g of girders) { const gx = Math.round(X(Number(g.offset))) + 0.5; ctx.beginPath(); ctx.moveTo(gx, T); ctx.lineTo(gx, deckY); ctx.stroke(); }
+  for (const g of girders) { const gx = Math.round(XD(g.offset)) + 0.5; ctx.beginPath(); ctx.moveTo(gx, T); ctx.lineTo(gx, deckY); ctx.stroke(); }
   ctx.setLineDash([]); ctx.globalAlpha = 1;
   // series
   series.forEach(se => {
-    const pts = se.rows.filter(r => isFinite(r.offset) && isFinite(val(r))).sort((a, b) => a.offset - b.offset);
+    const pts = se.rows.filter(r => isFinite(toEdge(project, r.offset)) && isFinite(val(r))).sort((a, b) => a.offset - b.offset);
     ctx.strokeStyle = se.color; ctx.fillStyle = se.color; ctx.lineWidth = 2 * s;
-    ctx.beginPath(); pts.forEach((r, k) => { const x = X(r.offset), y = sy(val(r)); if (k) ctx.lineTo(x, y); else ctx.moveTo(x, y); }); ctx.stroke();
-    pts.forEach(r => { ctx.beginPath(); ctx.arc(X(r.offset), sy(val(r)), 4 * s, 0, Math.PI * 2); ctx.fill(); });
+    ctx.beginPath(); pts.forEach((r, k) => { const x = XD(r.offset), y = sy(val(r)); if (k) ctx.lineTo(x, y); else ctx.moveTo(x, y); }); ctx.stroke();
+    pts.forEach(r => { ctx.beginPath(); ctx.arc(XD(r.offset), sy(val(r)), 4 * s, 0, Math.PI * 2); ctx.fill(); });
     if (series.length === 1 && opt.valueLabels !== false) {
       ctx.fillStyle = th.fg; ctx.font = f(10); ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-      pts.forEach(r => ctx.fillText(metric === 'df' ? r.df * 100 >= 0 ? (r.df * 100).toFixed(1) : '' : r.strain.toFixed(0), X(r.offset), sy(val(r)) - 6 * s));
+      pts.forEach(r => ctx.fillText(metric === 'df' ? r.df * 100 >= 0 ? (r.df * 100).toFixed(1) : '' : r.strain.toFixed(0), XD(r.offset), sy(val(r)) - 6 * s));
       ctx.textBaseline = 'middle';
     }
   });
@@ -263,23 +289,25 @@ export function drawDistribution(ctx, w, h, project, series, opt = {}) {
       const wp = loadCaseWheels(se.loadCase, veh);
       const y = deckY - 12 * s - i * 2 * s;
       ctx.fillStyle = th.fg; ctx.globalAlpha = 0.75;
-      for (const wx of [wp.a, wp.b]) { const tw = Math.max(4 * s, wp.tire * kx); ctx.fillRect(X(wx) - tw / 2, y - 6 * s, tw, 12 * s); }
+      for (const wx of [wp.a, wp.b]) { const tw = Math.max(4 * s, wp.tire * kx); ctx.fillRect(XD(wx) - tw / 2, y - 6 * s, tw, 12 * s); }
       ctx.globalAlpha = 1; ctx.font = f(10); ctx.textAlign = 'left';
-      ctx.fillText(se.loadCase.name, X(wp.b) + Math.max(4 * s, wp.tire * kx) / 2 + 4 * s, y);
+      ctx.fillText(se.loadCase.name, XD(wp.b) + Math.max(4 * s, wp.tire * kx) / 2 + 4 * s, y);
     });
   }
   // cross-section
   const deckT = Math.max(6 * s, Math.min(14 * s, 0.6 * kx));
   ctx.fillStyle = th.deck; ctx.fillRect(X(0), deckY, width * kx, deckT);
   ctx.strokeStyle = th.fg; ctx.lineWidth = 1; ctx.strokeRect(X(0), deckY, width * kx, deckT);
-  const curbA = Number(br.curbA) || 0, curbB = br.curbB !== '' && br.curbB != null ? Number(br.curbB) : width;
+  const cA = toEdge(project, br.curbA), cB = toEdge(project, br.curbB);
+  const curbA = isFinite(cA) ? cA : 0, curbB = isFinite(cB) ? cB : width;
   ctx.fillStyle = th.steel;
+  if (isCL(project)) { const cx = X(clPos(project)); ctx.fillRect(cx - 0.5 * s, deckY - 16 * s, 1 * s, 16 * s); ctx.fillStyle = th.fg; ctx.font = f(9); ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillText('CL', cx, deckY - 16 * s); ctx.fillStyle = th.steel; }
   if (curbA > 0.1) ctx.fillRect(X(0), deckY - 10 * s, Math.max(3 * s, curbA * kx), 10 * s);
   if (curbB < width - 0.1) ctx.fillRect(X(curbB), deckY - 10 * s, Math.max(3 * s, (width - curbB) * kx), 10 * s);
   const gH = 48 * s;
   ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.font = f(11);
   for (const g of girders) {
-    const gx = X(Number(g.offset)), top = deckY + deckT, fw = Math.max(8 * s, Math.min(24 * s, 1.1 * kx));
+    const gx = XD(g.offset), top = deckY + deckT, fw = Math.max(8 * s, Math.min(24 * s, 1.1 * kx));
     ctx.fillStyle = th.steel;
     ctx.fillRect(gx - fw / 2, top, fw, 3 * s); ctx.fillRect(gx - 1.5 * s, top, 3 * s, gH); ctx.fillRect(gx - fw / 2, top + gH - 3 * s, fw, 3 * s);
     ctx.fillStyle = th.fg; ctx.fillText(g.name, gx, top + gH + 4 * s);
@@ -287,7 +315,7 @@ export function drawDistribution(ctx, w, h, project, series, opt = {}) {
   if (!girders.length) {
     // slab: mark gauge positions under the deck
     ctx.fillStyle = th.accent;
-    for (const o of [...new Set(offs)]) { ctx.beginPath(); ctx.arc(X(o), deckY + deckT + 5 * s, 3 * s, 0, Math.PI * 2); ctx.fill(); }
+    for (const o of [...new Set(offs)]) { ctx.beginPath(); ctx.arc(XD(o), deckY + deckT + 5 * s, 3 * s, 0, Math.PI * 2); ctx.fill(); }
   }
   ctx.fillStyle = th.muted; ctx.font = f(10); ctx.textBaseline = 'bottom';
   ctx.textAlign = 'left'; ctx.fillText(br.edgeA || 'Edge A', X(0), h - 2 * s);

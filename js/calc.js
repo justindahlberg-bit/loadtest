@@ -104,31 +104,129 @@ export function channelPeaks(y, i0, i1) {
 // Load distribution for one vehicle window.
 // gauges: [{serial, offset, label}] distribution gauges (bottom of girder at one section, or slab gauges)
 // method: 'maxGauge' (time of the largest single-gauge strain) or 'maxSum' (time of largest total strain)
-export function distribution(gauges, series, i0, i1, method = 'maxGauge', bridgeType = 'girder') {
+// Tributary width of each gauge across the slab: half the distance to each neighbour, with the
+// outer gauges given the same half-spacing outward but not past the deck edges (edges = [a, b], ft).
+export function tributaryWidths(xs, edges) {
+  const idx = xs.map((x, k) => ({ k, x })).filter(o => isFinite(o.x)).sort((a, b) => a.x - b.x);
+  const out = xs.map(() => NaN);
+  idx.forEach((o, j) => {
+    const prev = idx[j - 1], next = idx[j + 1];
+    const left = prev ? (o.x - prev.x) / 2 : next ? (next.x - o.x) / 2 : 0.5;
+    const right = next ? (next.x - o.x) / 2 : prev ? (o.x - prev.x) / 2 : 0.5;
+    let a = o.x - left, b = o.x + right;
+    if (edges && isFinite(edges[0])) a = Math.max(a, edges[0]);
+    if (edges && isFinite(edges[1])) b = Math.min(b, edges[1]);
+    out[o.k] = Math.max(0, b - a);
+  });
+  return out;
+}
+
+// Load distribution for one vehicle window.
+// gauges: [{serial, name, offset, x (ft from Edge A), h (slab thickness, in)}] distribution gauges
+// method: 'maxGauge' (time of the largest single-gauge value) or 'maxSum' (time of the largest total)
+// Girder bridges: distribution = εᵢ / Σε at that instant.
+// Slab bridges (equivalent strip method): each gauge carries moment per unit width
+//   mᵢ = E·εᵢ·hᵢ²/6 (uncracked, neutral axis at mid-depth, gauge on the bottom face),
+//   M = Σ mᵢ·Δxᵢ over tributary widths Δxᵢ, and strip width = Σ(εᵢhᵢ²Δxᵢ) / max(εh²).
+//   Without thicknesses h cancels out (uniform slab) and strains are used directly.
+export function distribution(gauges, series, i0, i1, method = 'maxGauge', bridgeType = 'girder', opt = {}) {
   const list = gauges.filter(g => series[g.serial]);
   if (!list.length || i1 <= i0) return null;
+  const slab = bridgeType === 'slab';
+  const useH = slab && list.every(g => Number(g.h) > 0);
+  const h2 = list.map(g => useH ? Number(g.h) ** 2 : 1);
+  const trib = slab ? tributaryWidths(list.map(g => g.x ?? g.offset), opt.edges) : list.map(() => 1);
+  const tw = trib.map(t => isFinite(t) ? t : 0);
   let iPeak = i0, best = -Infinity;
   for (let i = i0; i < i1; i++) {
     let v;
-    if (method === 'maxSum') { v = 0; for (const g of list) v += series[g.serial][i]; }
-    else { v = -Infinity; for (const g of list) { const s = series[g.serial][i]; if (s > v) v = s; } }
+    if (method === 'maxSum') { v = 0; list.forEach((g, k) => { v += series[g.serial][i] * h2[k] * (slab ? tw[k] : 1); }); }
+    else { v = -Infinity; list.forEach((g, k) => { const s = series[g.serial][i] * h2[k]; if (s > v) v = s; }); }
     if (v > best) { best = v; iPeak = i; }
   }
-  const rows = list.map(g => ({ ...g, strain: series[g.serial][iPeak] }));
+  const rows = list.map((g, k) => ({ ...g, strain: series[g.serial][iPeak], h: useH ? Number(g.h) : g.h, trib: trib[k] }));
   const sum = rows.reduce((s, r) => s + r.strain, 0);
-  rows.forEach(r => { r.df = sum !== 0 ? r.strain / sum : NaN; });
-  const result = { iPeak, rows, sum, method };
-  if (bridgeType === 'slab') {
-    // Equivalent strip width = area under the transverse strain profile / peak strain
-    const pts = rows.filter(r => isFinite(r.offset)).sort((a, b) => a.offset - b.offset);
-    let area = 0;
-    for (let k = 1; k < pts.length; k++) area += (pts[k].offset - pts[k - 1].offset) * (pts[k].strain + pts[k - 1].strain) / 2;
-    const peak = Math.max(...pts.map(p => p.strain));
-    result.stripWidth = peak > 0 ? area / peak : NaN;
-    result.peakStrain = peak;
-    result.profileArea = area;
+  const result = { iPeak, rows, sum, method, slab, useH };
+  if (!slab) {
+    rows.forEach(r => { r.df = sum !== 0 ? r.strain / sum : NaN; });
+    return result;
+  }
+  const E = Number(opt.E) || 0;
+  rows.forEach((r, k) => {
+    r.w = r.strain * h2[k];                         // ε·h² (µε·in²), or ε when no thickness
+    r.contrib = isFinite(r.trib) ? r.w * r.trib : NaN;
+    if (useH && E) r.m = E * r.strain * 1e-6 * h2[k] / 6; // kip-ft per ft (= kip-in per in)
+  });
+  const total = rows.reduce((s, r) => s + (isFinite(r.contrib) ? r.contrib : 0), 0);
+  rows.forEach(r => { r.df = total !== 0 && isFinite(r.contrib) ? r.contrib / total : NaN; });
+  const gov = rows.filter(r => isFinite(r.trib)).reduce((a, r) => (!a || r.w > a.w ? r : a), null);
+  result.governing = gov;
+  result.wMax = gov ? gov.w : NaN;
+  result.peakStrain = gov ? gov.strain : NaN;
+  result.stripWidth = gov && gov.w > 0 ? total / gov.w : NaN;
+  result.weightedTotal = total;
+  if (useH && E) {
+    result.mMax = gov ? gov.m : NaN;
+    result.mTotal = rows.reduce((s, r) => s + (isFinite(r.m) && isFinite(r.trib) ? r.m * r.trib : 0), 0);
+    if (Number(opt.mStatic) > 0 && result.mMax > 0) {
+      result.mStatic = Number(opt.mStatic);
+      result.stripWidthStatic = result.mStatic / result.mMax;
+      result.staticRatio = result.mTotal / result.mStatic;
+    }
   }
   return result;
+}
+
+// ---- Transverse position datum ----
+// Each test picks how transverse positions are entered and stored:
+//   'edgeA' – feet from Edge A (left edge of the cross-section drawing)
+//   'cl'    – feet left (−) / right (+) of the roadway centerline
+// Values are stored exactly as entered (in the test's datum); drawings convert with toEdge().
+export const isCL = p => p.bridge.datum === 'cl';
+export function clPos(p) {
+  const c = p.bridge.clOffset;
+  if (c !== '' && c != null && isFinite(Number(c))) return Number(c);
+  return (Number(p.bridge.deckWidth) || 0) / 2;
+}
+export function toEdge(p, v) {
+  if (v === '' || v == null) return NaN;
+  const n = Number(v);
+  if (!isFinite(n)) return NaN;
+  return isCL(p) ? clPos(p) + n : n;
+}
+// "16 L" → -16, "2R" → 2, "CL" → 0, "-3.5" → -3.5 ; returns '' for blank, NaN if unreadable
+export function parsePos(s) {
+  const t = String(s ?? '').trim().toUpperCase().replace(/\s+/g, ' ');
+  if (!t) return '';
+  if (t === 'CL' || t === 'C' || t === '0 CL') return 0;
+  const m = /^([+-]?\d*\.?\d+)\s*(L|R|LT|RT|LEFT|RIGHT)?$/.exec(t);
+  if (!m) return NaN;
+  let v = Number(m[1]);
+  if (m[2]) v = m[2][0] === 'L' ? -Math.abs(v) : Math.abs(v);
+  return v;
+}
+export function fmtPos(p, v, d = 2) {
+  if (v === '' || v == null || !isFinite(Number(v))) return '';
+  const n = Number(v);
+  if (!isCL(p)) return String(+n.toFixed(d));
+  if (Math.abs(n) < 1e-9) return 'CL';
+  return `${+Math.abs(n).toFixed(d)} ${n < 0 ? 'L' : 'R'}`;
+}
+export const posUnit = p => isCL(p) ? 'ft L/R of CL' : 'ft from Edge A';
+// List of positions typed as "8 L, CL, 8 R" or "3.2, 15, 26.8"
+export const parsePosList = (p, s) => String(s || '').split(/[,;]+/).map(x => isCL(p) ? parsePos(x) : (x.trim() === '' ? '' : Number(x))).filter(x => x !== '' && isFinite(x));
+
+// Lengths in inches; accepts 236, 236", 19'-8", 19' 8", 19-8, 19.5'
+export function parseLen(s) {
+  const t = String(s ?? '').trim();
+  if (!t) return '';
+  let m = /^(\d+(?:\.\d+)?)\s*'\s*-?\s*(\d+(?:\.\d+)?)?\s*"?$/.exec(t);
+  if (m) return Number(m[1]) * 12 + (Number(m[2]) || 0);
+  m = /^(\d+)\s*-\s*(\d+(?:\.\d+)?)\s*"?$/.exec(t);
+  if (m) return Number(m[1]) * 12 + Number(m[2]);
+  m = /^(\d+(?:\.\d+)?)\s*"?$/.exec(t);
+  if (m) return Number(m[1]);
+  return NaN;
 }
 
 export const fmt = (v, d = 1) => (v == null || !isFinite(v)) ? '–' : Number(v).toFixed(d);

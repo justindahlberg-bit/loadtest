@@ -2,7 +2,7 @@
 import { state, save, uid, getPassData, registerChannels, gaugeOffset, groupKey, sortGauges, isStrain, isDefl, gaugeName, loadCaseById, vehicleById } from './state.js';
 import { db } from './db.js';
 import { parseTdms, toPass } from './tdms.js';
-import { zeroChannel, vehicleWindows, positionAt, indexRange, channelPeaks, distribution, speedMph, bridgeLength, fmt, ftin } from './calc.js';
+import { zeroChannel, vehicleWindows, positionAt, indexRange, channelPeaks, distribution, speedMph, bridgeLength, fmt, ftin, fmtPos, posUnit, toEdge } from './calc.js';
 import { PlotView, seriesStyle, PALETTE } from './plot.js';
 import { drawDistribution, drawInto } from './draw.js';
 import { esc, $, $$, bindForm, opts, dialog, confirmDlg, toast, saveFile, fmtTime } from './ui.js';
@@ -33,10 +33,12 @@ export async function importTdmsFiles(files) {
         channels: pass.channels.map(c => ({ serial: c.serial, type: c.type, unit: c.unit })), clicks: pass.clicks,
         vehicles: [], excluded: [], zeroMode: '', notes: '', marksOverride: false, marks: { ...p.marks }, imported: Date.now(),
       };
-      // Guess load case: next one in order without a pass yet
-      const used = new Set(p.passes.map(x => x.loadCaseId));
-      const nextLc = p.loadCases.find(lc => !used.has(lc.id));
-      if (nextLc) meta.loadCaseId = nextLc.id;
+      if (!(p.runs || []).length) {
+        // No run plan: guess the load case as the next one without a pass yet
+        const used = new Set(p.passes.map(x => x.loadCaseId));
+        const nextLc = p.loadCases.find(lc => !used.has(lc.id));
+        if (nextLc) meta.loadCaseId = nextLc.id;
+      }
       autoAssignVehicles(meta);
       p.passes.push(meta);
       ok++;
@@ -46,10 +48,52 @@ export async function importTdmsFiles(files) {
     }
   }
   p.passes.sort((a, b) => String(a.startLocal).localeCompare(String(b.startLocal)));
+  const linked = matchRuns();
+  if (linked) toast(`${linked} file${linked > 1 ? 's' : ''} matched to the run plan`, 3500);
   await save(true);
   if (errors.length) await dialog({ title: 'Some files were not imported', body: `<ul>${errors.map(e => `<li>${esc(e)}</li>`).join('')}</ul>`, buttons: [{ label: 'OK', value: true, primary: true }] });
   if (ok) toast(`Imported ${ok} file${ok > 1 ? 's' : ''}`);
   return ok;
+}
+
+// ---------- run plan ----------
+export const runById = id => (P().runs || []).find(r => r.id === id);
+export const runOfPass = pass => (P().runs || []).find(r => r.passId === pass.id);
+
+// Link a pass to a run (or unlink with run = null); the pass takes the run's load case.
+export function linkRun(pass, run) {
+  for (const r of P().runs || []) if (r.passId === pass.id) r.passId = '';
+  if (run) {
+    const other = P().passes.find(x => x.id === run.passId);
+    if (other && other !== pass) other.runId = '';
+    run.passId = pass.id; pass.runId = run.id;
+    if (run.loadCaseId && run.loadCaseId !== pass.loadCaseId) { pass.loadCaseId = run.loadCaseId; autoAssignVehicles(pass); }
+  } else pass.runId = '';
+}
+
+// Match imported files to planned runs: by the Start time tapped in the field (within 5 min of
+// the file's start), or — when no run has a start time — in order. Returns the number linked.
+export function matchRuns() {
+  const p = P(), runs = p.runs || [];
+  if (!runs.length) return 0;
+  const passIds = new Set(p.passes.map(x => x.id));
+  runs.forEach(r => { if (r.passId && !passIds.has(r.passId)) r.passId = ''; });
+  const free = p.passes.filter(ps => !ps.runId || !runs.some(r => r.id === ps.runId && r.passId === ps.id))
+    .sort((a, b) => String(a.startLocal).localeCompare(String(b.startLocal)));
+  let n = 0;
+  const timed = runs.some(r => r.tStart);
+  for (const ps of free) {
+    const st = passStart(ps); if (!st) continue;
+    let best = null, bd = Infinity;
+    for (const r of runs) {
+      if (r.passId || !r.tStart) continue;
+      const d = Math.abs(new Date(r.tStart) - st);
+      if (d < bd && d <= 5 * 60000) { bd = d; best = r; }
+    }
+    if (!best && !timed) best = runs.find(r => !r.passId);
+    if (best) { linkRun(ps, best); n++; }
+  }
+  return n;
 }
 
 // Assign mark (click) groups to vehicles. Splits at the largest gaps between marks.
@@ -92,9 +136,12 @@ export async function processPass(pass) {
     series[ch.serial] = zeroChannel(time, ch.data, mode, p.settings.zeroN || 10);
   }
   const wins = vehicleWindows(pass, p, time);
-  const distGauges = gauges.filter(g => g.dist && isStrain(g)).map(g => ({ serial: g.serial, name: gaugeName(g), girder: g.girder, offset: gaugeOffset(g) }))
+  const distGauges = gauges.filter(g => g.dist && isStrain(g)).map(g => ({ serial: g.serial, name: gaugeName(g), girder: g.girder, offset: gaugeOffset(g), x: toEdge(p, gaugeOffset(g)), h: g.thickness }))
     .sort((a, b) => (isFinite(a.offset) ? a.offset : 1e9) - (isFinite(b.offset) ? b.offset : 1e9));
   const E = Number(p.bridge.E) || 29000;
+  const dw = Number(p.bridge.deckWidth);
+  const lcNow = loadCaseById(pass.loadCaseId);
+  const distOpt = { E, edges: dw > 0 ? [0, dw] : null, mStatic: lcNow ? lcNow.mStatic : '' };
   const results = wins.map(w => {
     const [i0, i1] = indexRange(time, w.t0, w.t1);
     const pos = new Float64Array(i1 - i0);
@@ -105,7 +152,7 @@ export async function processPass(pass) {
       const pk = channelPeaks(y, i0, i1);
       peaks[g.serial] = { ...pk, tMax: time[pk.iMax], tMin: time[pk.iMin], xMax: positionAt(w.knots, time[pk.iMax]), xMin: positionAt(w.knots, time[pk.iMin]) };
     }
-    const dist = distribution(distGauges, series, i0, i1, p.settings.distMethod, p.bridge.type);
+    const dist = distribution(distGauges, series, i0, i1, p.settings.distMethod, p.bridge.type, distOpt);
     if (dist) { dist.tPeak = time[dist.iPeak]; dist.xPeak = positionAt(w.knots, dist.tPeak); }
     return { win: w, i0, i1, pos, peaks, dist, speed: speedMph(w.knots), vehicle: vehicleById(w.vehicleId) };
   });
@@ -114,7 +161,8 @@ export async function processPass(pass) {
 
 export const passLabel = pass => {
   const lc = loadCaseById(pass.loadCaseId);
-  return `${lc ? lc.name + ' · ' : ''}${pass.name}`;
+  const run = runOfPass(pass);
+  return `${lc ? lc.name + ' · ' : ''}${run ? `Run ${run.no} (${pass.name})` : pass.name}`;
 };
 
 export function passStart(pass) { const d = new Date(pass.startLocal); return isNaN(d) ? null : d; }
@@ -149,8 +197,9 @@ function renderPassList() {
   host.innerHTML = p.passes.map(ps => {
     const lc = loadCaseById(ps.loadCaseId);
     const st = passStart(ps);
+    const run = runOfPass(ps);
     return `<div class="pass-item ${ps.id === state.passId ? 'active' : ''}" data-id="${ps.id}">
-      <span class="name">${esc(ps.name)}</span>
+      <span class="name">${run ? `Run ${esc(run.no)} · ` : ''}${esc(ps.name)}</span>
       <span class="pill">${esc(lc ? lc.name : 'No load case')}</span>
       <span class="muted small">${st ? st.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''} · ${fmt(ps.duration, 0)} s · ${ps.clicks.length} marks · ${ps.channels.length} ch</span></div>`;
   }).join('');
@@ -172,6 +221,7 @@ async function renderDetail() {
       <button class="btn small" id="csvBtn">Export CSV</button><button class="btn small danger" id="delPass">Delete pass</button></div>
     <div class="grid" style="margin-top:10px">
       <label>Pass name<input data-bind="passes.${pi}.name"></label>
+      ${(p.runs || []).length ? `<label>Run (from run plan)<select id="runSel">${opts([['', '— not linked —'], ...p.runs.map(r => [r.id, `Run ${r.no} – ${loadCaseById(r.loadCaseId)?.name || '?'} ${r.speed || ''}${r.passId && r.passId !== pass.id ? ' (has a file)' : ''}`])], runOfPass(pass)?.id || '')}</select></label>` : ''}
       <label>Load case<select data-bind="passes.${pi}.loadCaseId" id="lcSel">${opts([['', '— choose —'], ...lcs.map(l => [l.id, `${l.name}${l.description ? ' – ' + l.description : ''}`])])}</select></label>
       <label>Zeroing<select data-bind="passes.${pi}.zeroMode" id="zeroSel">${opts([['', `Default (${p.settings.zeroMode === 'linear' ? 'linear drift' : p.settings.zeroMode})`], ['linear', 'Linear drift: start → end'], ['initial', 'Initial readings only'], ['none', 'None (raw)']])}</select></label>
       <label>Notes<input data-bind="passes.${pi}.notes" placeholder="e.g. third truck deviated west"></label>
@@ -209,6 +259,7 @@ async function renderDetail() {
     p.passes.splice(p.passes.indexOf(pass), 1); await db.del('passData', pass.id); state.passCache.delete(pass.id); state.passId = p.passes[0]?.id || null; save(); renderPassList(); renderDetail();
   };
   $('#csvBtn').onclick = () => exportCsv(pass);
+  if ($('#runSel')) $('#runSel').onchange = e => { linkRun(pass, runById(e.target.value) || null); save(); renderPassList(); renderDetail(); };
   $('#addVeh').onclick = () => { pass.vehicles.push({ vehicleId: p.vehicles[0]?.id || '', from: 1, to: pass.clicks.length, manual: !pass.clicks.length, tOn: '', tOff: '' }); save(); renderVehRows(pass); refresh(pass); };
   $('#autoVeh').onclick = () => { autoAssignVehicles(pass); save(); renderVehRows(pass); refresh(pass); };
   $('#toReport').onclick = async () => {
@@ -307,6 +358,10 @@ export function buildSpec(pass, r, v, opt = {}) {
     vlines.push({ x: 0, label: 'Bridge start', color: '#888' });
     (p.bridge.spans || []).forEach((s, j) => { acc += Number(s) || 0; vlines.push({ x: acc, label: j === p.bridge.spans.length - 1 ? 'Bridge end' : `Support ${j + 2}`, color: '#888' }); });
     if (res.dist && v.qty !== 'defl') vlines.push({ x: res.dist.xPeak, label: 'Peak', color: '#d62728', dash: [2, 2], row: 1 });
+    // gauge lines (longitudinal position of the plotted gauges)
+    const lines = new Map();
+    gauges.forEach(g => { const x = Number(g.xLong); if (g.xLong !== '' && g.xLong != null && isFinite(x)) lines.set(x, g.section || 'Gauges'); });
+    for (const [x, sec] of lines) vlines.push({ x, label: `Gauges – ${sec}`, color: '#2a9d3a', dash: [6, 2], row: 2 });
     if (!res.win.knots.length) title = (title ? title + ' – ' : '') + 'no position data (set marks or on/off times)';
   } else {
     x = r.time; xLabel = 'Time (s)';
@@ -327,6 +382,29 @@ export function buildSpec(pass, r, v, opt = {}) {
     }
   }
   return { x, series, xLabel, yLabel, vlines, vbands, title };
+}
+
+// Slab bridge: equivalent strip width table and summary (moments from ε·h² when thicknesses are known)
+export function slabSummaryText(p, d) {
+  if (!d || !d.slab) return '';
+  const g = d.governing;
+  const parts = [`Equivalent strip width = ${fmt(d.stripWidth, 2)} ft`];
+  if (d.useH) {
+    parts.push(`= Σ(ε·h²·Δx) ${fmt(d.weightedTotal / 1000, 1)} ×10³ µε·in²·ft ÷ (ε·h²)max ${fmt(d.wMax / 1000, 2)} ×10³ µε·in² at ${g ? g.name : '–'}`);
+    if (isFinite(d.mTotal)) parts.push(`Measured total moment M = Σ m·Δx = ${fmt(d.mTotal, 1)} kip-ft; peak m = ${fmt(d.mMax, 2)} kip-ft/ft (E = ${Number(p.bridge.E).toLocaleString()} ksi)`);
+    if (isFinite(d.stripWidthStatic)) parts.push(`Statics check: M_static ${fmt(d.mStatic, 1)} kip-ft ÷ m_max = ${fmt(d.stripWidthStatic, 2)} ft; measured M / M_static = ${fmt(d.staticRatio, 2)}`);
+  } else {
+    parts.push(`= Σ(ε·Δx) ÷ ε_max ${fmt(d.peakStrain, 1)} µε at ${g ? g.name : '–'} (uniform thickness assumed – enter slab thicknesses on the Gauges tab to account for thickness variation)`);
+  }
+  return parts;
+}
+
+function slabTableHtml(p, d, maxDf) {
+  const t = slabSummaryText(p, d);
+  return `<div class="table-wrap"><table class="data"><thead><tr><th>Gauge</th><th class="num">Position (${posUnit(p)})</th><th class="num">Strain (µε)</th>${d.useH ? '<th class="num">h (in)</th><th class="num">ε·h² (×10³)</th><th class="num">m (kip-ft/ft)</th>' : ''}<th class="num">Δx (ft)</th><th class="num">Share</th><th style="width:22%"></th></tr></thead><tbody>
+    ${d.rows.map(x => `<tr${x === d.governing ? ' style="font-weight:600"' : ''}><td>${esc(x.name)}${x === d.governing ? ' ◂ max' : ''}</td><td class="num">${fmtPos(p, x.offset)}</td><td class="num">${fmt(x.strain, 1)}</td>${d.useH ? `<td class="num">${fmt(x.h, 2)}</td><td class="num">${fmt(x.w / 1000, 2)}</td><td class="num">${fmt(x.m, 3)}</td>` : ''}<td class="num">${fmt(x.trib, 2)}</td><td class="num">${fmt(x.df * 100, 1)}%</td><td><div class="bar" style="width:${Math.max(0, x.df / maxDf * 100)}%"></div></td></tr>`).join('')}
+    </tbody></table></div>
+    <p><b>${esc(t[0])}</b><br><span class="muted small">${t.slice(1).map(esc).join('<br>')}</span></p>`;
 }
 
 // Series for the distribution-vs-cross-section plot (one per vehicle)
@@ -352,11 +430,10 @@ function renderResults(pass, r) {
     if (d) {
       const maxDf = Math.max(...d.rows.map(x => x.df).filter(isFinite), 0.01);
       distHtml = `<h3>Load distribution – ${p.bridge.type === 'slab' ? 'slab' : 'girders'} at ${esc(p.bridge.distSection || 'section')}</h3>
-      <p class="muted small">Strains at ${fmt(d.tPeak, 2)} s${isFinite(d.xPeak) ? `, front axle at ${fmt(d.xPeak, 1)} ft` : ''} (${p.settings.distMethod === 'maxSum' ? 'time of largest total strain' : 'time of largest single-gauge strain'}).</p>
-      <div class="table-wrap"><table class="data"><thead><tr><th>Gauge</th><th>Girder</th><th class="num">Offset (ft)</th><th class="num">Strain (µε)</th><th class="num">Distribution</th><th style="width:30%"></th></tr></thead><tbody>
-      ${d.rows.map(x => `<tr><td>${esc(x.name)}</td><td>${esc(x.girder || '')}</td><td class="num">${fmt(x.offset, 2)}</td><td class="num">${fmt(x.strain, 1)}</td><td class="num">${fmt(x.df * 100, 1)}%</td><td><div class="bar" style="width:${Math.max(0, x.df / maxDf * 100)}%"></div></td></tr>`).join('')}
-      <tr><td colspan="3"><b>Sum</b></td><td class="num"><b>${fmt(d.sum, 1)}</b></td><td class="num">100%</td><td></td></tr></tbody></table></div>
-      ${p.bridge.type === 'slab' ? `<p><b>Equivalent strip width = ${fmt(d.stripWidth, 2)} ft</b> <span class="muted small">(area under transverse strain profile ${fmt(d.profileArea, 1)} µε·ft ÷ peak ${fmt(d.peakStrain, 1)} µε)</span></p>` : ''}`;
+      <p class="muted small">Strains at ${fmt(d.tPeak, 2)} s${isFinite(d.xPeak) ? `, front axle at ${fmt(d.xPeak, 1)} ft` : ''} (${p.settings.distMethod === 'maxSum' ? 'time of largest total' : d.useH ? 'time of largest ε·h² at any gauge' : 'time of largest single-gauge strain'}).${d.slab ? ' Share = each gauge’s portion of the total moment across the slab.' : ''}</p>
+      ${d.slab ? slabTableHtml(p, d, maxDf) : `<div class="table-wrap"><table class="data"><thead><tr><th>Gauge</th><th>Girder</th><th class="num">Position (${posUnit(p)})</th><th class="num">Strain (µε)</th><th class="num">Distribution</th><th style="width:30%"></th></tr></thead><tbody>
+      ${d.rows.map(x => `<tr><td>${esc(x.name)}</td><td>${esc(x.girder || '')}</td><td class="num">${fmtPos(p, x.offset)}</td><td class="num">${fmt(x.strain, 1)}</td><td class="num">${fmt(x.df * 100, 1)}%</td><td><div class="bar" style="width:${Math.max(0, x.df / maxDf * 100)}%"></div></td></tr>`).join('')}
+      <tr><td colspan="3"><b>Sum</b></td><td class="num"><b>${fmt(d.sum, 1)}</b></td><td class="num">100%</td><td></td></tr></tbody></table></div>`}`;
     } else distHtml = `<p class="warn-box">No distribution gauges in this pass. On the Gauges tab, tick <b>Dist.</b> for the bottom gauges at ${esc(p.bridge.distSection || 'the distribution section')}, or use “Pick distribution gauges…”.</p>`;
     const strainG = r.gauges.filter(isStrain), deflG = r.gauges.filter(isDefl);
     const pkRow = (g, isD) => { const pk = res.peaks[g.serial]; if (!pk) return ''; return `<tr><td>${esc(gaugeName(g))}</td><td>${esc([g.girder, g.location, g.section].filter(Boolean).join(' · '))}</td>

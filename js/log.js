@@ -107,7 +107,7 @@ export async function addNote(preset = {}) {
 let filter = 'all';
 export function renderLog(main) {
   const p = P();
-  main.innerHTML = `<div class="card"><div class="row"><h2 style="margin:0">Field log</h2><span class="spacer"></span>
+  main.innerHTML = `<div class="card" id="checklist"></div><div class="card"><div class="row"><h2 style="margin:0">Field log</h2><span class="spacer"></span>
     <button class="btn" data-quick="Pass start">▶ Pass start</button><button class="btn" data-quick="Pass end">■ Pass end</button>
     <button class="btn primary" id="logNote">＋ Note</button><button class="btn primary" id="logPhoto">📷 Photo</button></div>
     <p class="muted small">Everything is time-stamped automatically. Pass start/end buttons log the time instantly with the current load case.</p>
@@ -124,7 +124,30 @@ export function renderLog(main) {
     p.log.push({ id: uid(), kind: 'note', ts: new Date().toISOString(), tag: b.dataset.quick, loadCaseId: lcId, text: '' });
     await save(true); toast(`${b.dataset.quick} logged ${fmtTime(Date.now())}`); renderLogList();
   });
+  renderChecklist();
   renderLogList();
+}
+
+// Setup checklist: editable items, each time-stamped when ticked
+function renderChecklist() {
+  const p = P(), host = $('#checklist'); if (!host) return;
+  p.checklist = p.checklist || [];
+  const done = p.checklist.filter(c => c.done).length;
+  host.innerHTML = `<div class="row"><h2 style="margin:0">Setup checklist</h2><span class="muted small">${done} of ${p.checklist.length} done</span><span class="spacer"></span><button class="btn small" id="ckEdit">${host.dataset.edit ? 'Done editing' : 'Edit list'}</button></div>
+    <div class="list" style="margin-top:8px">${p.checklist.map((c, i) => `<div class="row" style="flex-wrap:nowrap">
+      <input type="checkbox" data-ck="${i}" ${c.done ? 'checked' : ''} aria-label="${esc(c.text)}">
+      ${host.dataset.edit ? `<input data-cktext="${i}" value="${esc(c.text)}"><button class="btn small danger" data-ckdel="${i}" aria-label="Remove item">✕</button>` : `<span style="flex:1${c.done ? ';color:var(--muted);text-decoration:line-through' : ''}">${esc(c.text)}</span><span class="muted small">${c.done && c.ts ? fmtTime(c.ts) : ''}</span>`}
+    </div>`).join('')}</div>
+    ${host.dataset.edit ? `<div class="row" style="margin-top:8px;flex-wrap:nowrap"><input id="ckNew" placeholder="New checklist item"><button class="btn small" id="ckAdd">＋ Add</button></div>` : ''}`;
+  $$('[data-ck]', host).forEach(cb => cb.onchange = () => { const c = p.checklist[+cb.dataset.ck]; c.done = cb.checked; c.ts = cb.checked ? new Date().toISOString() : ''; save(); renderChecklist(); });
+  $$('[data-cktext]', host).forEach(inp => inp.oninput = () => { p.checklist[+inp.dataset.cktext].text = inp.value; save(); });
+  $$('[data-ckdel]', host).forEach(b => b.onclick = () => { p.checklist.splice(+b.dataset.ckdel, 1); save(); renderChecklist(); });
+  $('#ckEdit').onclick = () => { if (host.dataset.edit) delete host.dataset.edit; else host.dataset.edit = '1'; renderChecklist(); };
+  if ($('#ckAdd')) {
+    const add = () => { const v = $('#ckNew').value.trim(); if (!v) return; p.checklist.push({ id: uid(), text: v, done: false, ts: '' }); save(); renderChecklist(); $('#ckNew')?.focus(); };
+    $('#ckAdd').onclick = add;
+    $('#ckNew').onkeydown = e => { if (e.key === 'Enter') add(); };
+  }
 }
 
 async function pickLc(what) {

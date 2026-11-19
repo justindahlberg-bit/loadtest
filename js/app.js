@@ -6,8 +6,9 @@ import { renderBridge, renderGauges, renderVehicles, renderLoadCases } from './s
 import { renderPasses, importTdmsFiles } from './passes.js';
 import { renderLog, renderLogList, addNote, addPhotos } from './log.js';
 import { buildReport, REPORT_SECTIONS } from './report.js';
+import { renderRuns } from './runs.js';
 
-const TABS = { bridge: renderBridge, gauges: renderGauges, vehicles: renderVehicles, loadcases: renderLoadCases, passes: renderPasses, log: renderLog, report: renderReport };
+const TABS = { bridge: renderBridge, gauges: renderGauges, vehicles: renderVehicles, loadcases: renderLoadCases, runs: renderRuns, passes: renderPasses, log: renderLog, report: renderReport };
 
 function render() {
   const main = $('#main');
@@ -154,6 +155,8 @@ async function boot() {
     if (act === 'duplicate') {
       const c = JSON.parse(JSON.stringify(p));
       Object.assign(c, { id: uid(), name: p.name + ' (setup copy)', passes: [], log: [], created: Date.now() });
+      (c.runs || []).forEach(r => Object.assign(r, { id: uid(), tStart: '', tStop: '', passId: '' }));
+      (c.checklist || []).forEach(k => Object.assign(k, { done: false, ts: '' }));
       c.gauges.forEach(g => { if (g.status === 'replaced') g.status = 'ok'; });
       state.project = c; await save(true); await loadProjects(); renderProjectSelect(); render(); toast('Setup copied – gauges, vehicles and load paths kept');
     }

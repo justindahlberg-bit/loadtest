@@ -5,21 +5,28 @@ export const uid = () => Date.now().toString(36) + Math.random().toString(36).sl
 
 export const PHOTO_TAGS = ['Bridge overview', 'Elevation', 'Deck / roadway', 'Underside', 'Gauge installation', 'Deflection transducer', 'Data acquisition', 'Load vehicle', 'Vehicle weighing', 'Load path / marks', 'Deterioration / damage', 'Traffic control', 'Other'];
 export const NOTE_TAGS = ['General', 'Pass start', 'Pass end', 'Truck stopped', 'Gauge issue', 'Traffic', 'Weather', 'Observation'];
-export const LOCATIONS = ['Bottom', 'Top', 'Web', 'Deck', 'Other'];
+export const LOCATIONS = ['Bottom', 'Top', 'Web', 'Deck', 'Bottom flange', 'Top flange', 'Other'];
+export const DEFAULT_CHECKLIST = ['Gauge line located and marked; offsets measured', 'Surface prep and gauge installation complete', 'All channels reading; zero/balance recorded', 'Load paths and position marks on deck', 'Truck weighed and measured', 'Photos: gauge layout, truck, each path', 'Traffic control in place'];
 
 export function newProject(name) {
   const today = new Date().toISOString().slice(0, 10);
   return {
-    id: uid(), name: name || 'New bridge test', created: Date.now(), updated: Date.now(), schema: 1,
+    id: uid(), name: name || 'New bridge test', created: Date.now(), updated: Date.now(), schema: 2,
     bridge: {
       structureNo: '', name: '', location: '', route: '', featureCrossed: '', county: '', owner: '', yearBuilt: '',
       testDate: today, type: 'girder', girderType: '', material: 'steel', E: 29000, spans: [], skew: 0,
       deckWidth: '', curbA: '', curbB: '', laneLines: '', edgeA: 'West', edgeB: 'East', lookDir: 'north',
+      datum: 'edgeA', clOffset: '', driverSide: 'left',
       girders: [], distSection: 'Midspan', notes: '',
+      fhwaNo: '', depth: '', rails: '', substructure: '', ratings: '', loadRating: '', inspectionDate: '', custom: [],
     },
-    test: { crew: '', weather: '', temperature: '', gaugeLength: '', dataSystem: 'BDI STS-Wifi / STS-Live', purpose: '' },
+    test: {
+      crew: '', weather: '', temperature: '', gaugeLength: '', dataSystem: 'BDI STS-Wifi / STS-Live', purpose: '',
+      startTime: '', deckTemp: '', daqSerial: '', excitation: '', gaugeFactor: '', zeroTime: '', direction: '', trafficControl: '', fileNaming: '', custom: [],
+    },
     marks: { first: -20, spacing: 20, custom: '' },
-    gauges: [], vehicles: [], loadCases: [], passes: [], log: [],
+    gauges: [], vehicles: [], loadCases: [], passes: [], log: [], runs: [],
+    checklist: DEFAULT_CHECKLIST.map(text => ({ id: uid(), text, done: false, ts: '' })),
     settings: { zeroMode: 'linear', zeroN: 10, distMethod: 'maxGauge', stressUnit: 'ksi', groupBy: 'girder', sortBy: 'order' },
     report: { title: 'Bridge Load Test Report', author: '', company: '', client: '', date: today, intro: '', conclusions: '', groupBy: 'girder', sections: {} },
   };
@@ -78,6 +85,7 @@ function migrate(p) {
   const d = newProject();
   for (const k of Object.keys(d)) if (p[k] === undefined) p[k] = d[k];
   for (const k of ['bridge', 'test', 'settings', 'report', 'marks']) p[k] = { ...d[k], ...p[k] };
+  if (!p.schema || p.schema < 2) { p.checklist = p.checklist && p.checklist.length ? p.checklist : []; p.schema = 2; }
 }
 
 export async function getPassData(passId) {
@@ -92,10 +100,13 @@ export const vehicleById = id => (state.project.vehicles || []).find(v => v.id =
 export const loadCaseById = id => (state.project.loadCases || []).find(l => l.id === id);
 export const gaugeBySerial = s => state.project.gauges.find(g => g.serial === s);
 
+// Transverse position of a gauge in the test's datum: measured, else planned, else its girder line
 export function gaugeOffset(g) {
-  if (g.offset !== '' && g.offset != null && isFinite(Number(g.offset))) return Number(g.offset);
-  const gi = (state.project.bridge.girders || []).find(x => x.name === g.girder);
-  return gi ? Number(gi.offset) : NaN;
+  const num = v => v !== '' && v != null && isFinite(Number(v));
+  if (num(g.offset)) return Number(g.offset);
+  if (num(g.plannedOffset)) return Number(g.plannedOffset);
+  const gi = state.project.bridge.type === 'girder' && (state.project.bridge.girders || []).find(x => x.name === g.girder);
+  return gi && num(gi.offset) ? Number(gi.offset) : NaN;
 }
 
 export function groupKey(g, by) {
@@ -129,12 +140,24 @@ export const isDefl = g => /displ/i.test(g.type || '');
 export const shortSerial = s => String(s).replace(/_\d+[A-Z]?$/i, '');
 export const gaugeName = g => g.label ? `${g.label} (${shortSerial(g.serial)})` : shortSerial(g.serial);
 
-// Ensure every channel from a pass exists in the gauge map
+// "B2944_18B" → "2944", "SP0360_17A" → "360", "4814" → "4814": lets a typed serial match the file's channel name
+export const serialKey = s => String(s || '').toUpperCase().trim().replace(/_.*$/, '').replace(/^[A-Z]+/, '').replace(/^0+(?=\d)/, '');
+
+export const newGauge = (o = {}) => ({ serial: '', type: 'Strain', unit: 'ue', label: '', span: '', girder: '', section: '', xLong: '', location: '', plannedOffset: '', offset: '', thickness: '', dist: false, status: 'ok', replaces: '', notes: '', order: 0, ...o });
+
+// Ensure every channel from a pass exists in the gauge map. A planned gauge whose typed serial
+// matches the channel (e.g. "2944" or "B2944" for channel "B2944_18B") takes the file's full name.
 export function registerChannels(channels) {
   const p = state.project;
   let maxOrder = Math.max(0, ...p.gauges.map(g => Number(g.order) || 0));
+  const matched = [];
   for (const c of channels) {
     if (p.gauges.find(g => g.serial === c.serial)) continue;
-    p.gauges.push({ serial: c.serial, type: c.type, unit: c.unit, label: '', span: '', girder: '', section: '', location: /displ/i.test(c.type) ? 'Bottom' : '', offset: '', dist: false, status: /unknown/i.test(c.type) ? 'unused' : 'ok', replaces: '', notes: '', order: ++maxOrder });
+    const key = serialKey(c.serial);
+    const fam = /displ/i.test(c.type) ? 'd' : /strain/i.test(c.type) ? 's' : '';
+    const g = key && p.gauges.find(x => x.serial && !channels.some(ch => ch.serial === x.serial) && serialKey(x.serial) === key && (!fam || !x.type || (/displ/i.test(x.type) ? 'd' : 's') === fam));
+    if (g) { matched.push(`${g.serial} → ${c.serial}`); g.serial = c.serial; g.type = c.type; g.unit = c.unit; continue; }
+    p.gauges.push(newGauge({ serial: c.serial, type: c.type, unit: c.unit, location: /displ/i.test(c.type) ? 'Bottom' : '', status: /unknown/i.test(c.type) ? 'unused' : 'ok', order: ++maxOrder }));
   }
+  return matched;
 }

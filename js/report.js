@@ -1,10 +1,10 @@
 // Word (.docx) report generator. Uses the docx library loaded as window.docx.
 import { state, getPassData, gaugeOffset, groupKey, sortGauges, isStrain, isDefl, gaugeName, loadCaseById, vehicleById, shortSerial } from './state.js';
 import { db } from './db.js';
-import { processPass, buildSpec, passStart, passLabel, distSeries } from './passes.js';
+import { processPass, buildSpec, passStart, passLabel, distSeries, slabSummaryText } from './passes.js';
 import { plotPng, PALETTE } from './plot.js';
 import { drawCrossSection, drawTruck, canvasPng, loadCaseWheels, drawDistribution } from './draw.js';
-import { fmt, ftin, bridgeLength } from './calc.js';
+import { fmt, ftin, bridgeLength, isCL, fmtPos, posUnit } from './calc.js';
 
 export const REPORT_SECTIONS = [
   ['intro', 'Introduction'], ['bridge', 'Bridge description'], ['instr', 'Instrumentation'], ['vehicles', 'Load vehicles'],
@@ -53,7 +53,7 @@ export async function buildReport(onProgress = () => { }) {
   const deflG = sortGauges(p.gauges.filter(g => isDefl(g) && g.status !== 'unused'), set.sortBy);
   const L = bridgeLength(p);
   const XS_W = 1800, XS_FONT = 2.4;
-  const xsHeight = nLc => Math.round(XS_FONT * (200 + Math.max(1, nLc) * 30 + (br.type === 'slab' ? 0 : 80)));
+  const xsHeight = nLc => Math.round(XS_FONT * (200 + Math.max(1, nLc) * 30 + (br.type === 'girder' && (br.girders || []).length ? 80 : 0)));
 
   // ---- title page ----
   onProgress('Title page');
@@ -83,9 +83,16 @@ export async function buildReport(onProgress = () => { }) {
   if (on('bridge')) {
     children.push(h1(`${++sec}. Bridge Description`));
     const spans = (br.spans || []).filter(Boolean);
-    children.push(para(`${bridgeName} is a ${spans.length ? spans.length + '-span ' : ''}${br.type === 'slab' ? 'slab' : 'girder'} bridge${br.girderType ? ' (' + br.girderType + ')' : ''}${br.featureCrossed ? ' carrying ' + (br.route || '[route]') + ' over ' + br.featureCrossed : ''}. ${spans.length ? `Span lengths are ${spans.map(s => s + ' ft').join(', ')} for a total length of ${fmt(L, 1)} ft. ` : ''}${br.deckWidth ? `The deck is ${fmt(br.deckWidth, 1)} ft wide out-to-out. ` : ''}${Number(br.skew) ? `The bridge has a skew of ${br.skew}°. ` : ''}${br.yearBuilt ? `It was built in ${br.yearBuilt}.` : ''}`));
+    children.push(para(`${bridgeName} is a ${spans.length ? spans.length + '-span ' : ''}${br.type === 'slab' ? 'slab' : br.type === 'girder' ? 'girder' : ''} bridge${br.girderType ? ' (' + br.girderType + ')' : ''}${br.featureCrossed ? ' carrying ' + (br.route || '[route]') + ' over ' + br.featureCrossed : ''}. ${spans.length ? `Span lengths are ${spans.map(s => s + ' ft').join(', ')} for a total length of ${fmt(L, 1)} ft. ` : ''}${br.deckWidth ? `The deck is ${fmt(br.deckWidth, 1)} ft wide out-to-out. ` : ''}${Number(br.skew) ? `The bridge has a skew of ${br.skew}°. ` : ''}${br.yearBuilt ? `It was built in ${br.yearBuilt}.` : ''}`));
     if (br.notes) children.push(...multi(br.notes));
-    const rows = [['Structure number', br.structureNo], ['Bridge name', br.name], ['Location', [br.location, br.county && br.county + ' County'].filter(Boolean).join(', ')], ['Route / feature carried', br.route], ['Feature crossed', br.featureCrossed], ['Owner', br.owner], ['Year built', br.yearBuilt], ['Bridge type', br.type === 'slab' ? 'Slab' : 'Girder'], ['Superstructure', br.girderType], ['Span lengths (ft)', spans.join(', ')], ['Skew (deg)', br.skew], ['Deck width (ft)', br.deckWidth], ['Number of girders', br.type === 'slab' ? '' : (br.girders || []).length || ''], ['Girder spacing', (br.girders || []).length > 1 ? (br.girders || []).slice(1).map((g, i) => ftin(Number(g.offset) - Number(br.girders[i].offset))).join(', ') : '']].filter(r => r[1] !== '' && r[1] != null);
+    const isG = br.type === 'girder';
+    const roadway = isFinite(Number(br.curbA)) && isFinite(Number(br.curbB)) && br.curbA !== '' && br.curbB !== '' ? fmt(Math.abs(Number(br.curbB) - Number(br.curbA)), 1) : '';
+    const rows = [['Structure number', br.structureNo], ['FHWA number', br.fhwaNo], ['Bridge name', br.name], ['Location', [br.location, br.county && br.county + ' County'].filter(Boolean).join(', ')], ['Route / feature carried', br.route], ['Feature crossed', br.featureCrossed], ['Owner', br.owner], ['Year built', br.yearBuilt],
+      ['Bridge type', { slab: 'Slab', girder: 'Girder / beam', other: 'Other' }[br.type] || br.type], ['Superstructure', br.girderType], ['Material', br.material], ['Slab thickness / girder depth', br.depth], ['Span lengths (ft)', spans.join(' – ')], ['Total length (ft)', L ? fmt(L, 1) : ''], ['Skew (deg)', br.skew],
+      ['Deck width, out-to-out (ft)', br.deckWidth], ['Roadway, curb to curb (ft)', roadway], ['Rails / barriers', br.rails], ['Substructure', br.substructure],
+      ['Number of girders', isG ? (br.girders || []).length || '' : ''], ['Girder spacing', isG && (br.girders || []).length > 1 ? (br.girders || []).slice(1).map((g, i) => ftin(Number(g.offset) - Number(br.girders[i].offset))).join(', ') : ''],
+      ['Condition ratings (deck / super / sub)', br.ratings], ['Load rating', br.loadRating], ['Inspection report', br.inspectionDate],
+      ...(br.custom || []).filter(c => c.label || c.value).map(c => [c.label, c.value])].filter(r => r[1] !== '' && r[1] != null);
     children.push(caption('Table', 'Bridge data'));
     children.push(table(['Item', 'Value'], rows));
   }
@@ -96,10 +103,12 @@ export async function buildReport(onProgress = () => { }) {
     children.push(h1(`${++sec}. Instrumentation`));
     const okS = strainG.filter(g => !['unused', 'removed'].includes(g.status)), okD = deflG.filter(g => !['unused', 'removed'].includes(g.status));
     const rate = p.passes[0]?.sampleRate;
-    children.push(para(`The bridge was instrumented with ${okS.length} BDI strain transducers${okD.length ? ` and ${okD.length} deflection transducers` : ''}. ${p.test.gaugeLength ? `Strain transducers were installed with ${p.test.gaugeLength}. ` : ''}Data were recorded with the ${p.test.dataSystem || 'BDI STS'} system${rate ? ` at ${rate} samples per second` : ''}. Gauges are identified by their BDI serial numbers. Transverse positions are measured from the ${br.edgeA || 'Edge A'} edge of the deck, with the cross-section viewed looking ${br.lookDir || 'up-station'}.`));
-    const rows = [...okS, ...okD].map(g => [g.order ?? '', g.serial, isDefl(g) ? 'Deflection' : 'Strain', g.span, g.girder, g.section, g.location, isFinite(gaugeOffset(g)) ? fmt(gaugeOffset(g), 2) : '', g.dist ? 'Yes' : '', [g.status !== 'ok' ? g.status : '', g.replaces ? 'replaces ' + g.replaces : '', g.notes].filter(Boolean).join('; ')]);
+    children.push(para(`The bridge was instrumented with ${okS.length} BDI strain transducers${okD.length ? ` and ${okD.length} deflection transducers` : ''}. ${p.test.gaugeLength ? `Strain transducers were installed with ${p.test.gaugeLength}. ` : ''}Data were recorded with the ${p.test.dataSystem || 'BDI STS'} system${rate ? ` at ${rate} samples per second` : ''}. Gauges are identified by their BDI serial numbers. ${isCL(p) ? `Transverse positions are measured left (L) and right (R) of the roadway centerline` : `Transverse positions are measured from the ${br.edgeA || 'Edge A'} edge of the deck`}, with the cross-section viewed looking ${br.lookDir || 'up-station'}.${[...okS, ...okD].some(g => g.xLong !== '' && g.xLong != null) ? ' Longitudinal positions are measured from the start of the bridge.' : ''}`));
+    const showLong = [...okS, ...okD].some(g => g.xLong !== '' && g.xLong != null);
+    const rows = [...okS, ...okD].map(g => [g.order ?? '', g.label || '', g.serial, isDefl(g) ? 'Deflection' : 'Strain', g.span, br.type === 'girder' ? g.girder : null, g.section, showLong ? g.xLong : null, g.location, fmtPos(p, gaugeOffset(g)), g.dist ? 'Yes' : '', [g.status !== 'ok' ? g.status : '', g.replaces ? 'replaces ' + g.replaces : '', g.notes].filter(Boolean).join('; ')].filter(c => c !== null));
+    const head = ['#', 'Label', 'Serial', 'Type', 'Span', ...(br.type === 'girder' ? ['Girder'] : []), 'Section', ...(showLong ? ['Along bridge (ft)'] : []), 'Location', `Position (${posUnit(p)})`, 'Dist.', 'Notes'];
     children.push(caption('Table', 'Gauge locations'));
-    children.push(table(['#', 'Serial', 'Type', 'Span', 'Girder', 'Section', 'Location', 'Offset (ft)', 'Dist.', 'Notes'], rows, [0, 7]));
+    children.push(table(head, rows, [0, head.indexOf(`Position (${posUnit(p)})`)]));
     const gaugesXs = p.gauges.filter(g => !['unused', 'removed', 'replaced'].includes(g.status)).map(g => ({ serial: g.serial, short: g.label || shortSerial(g.serial), type: g.type, location: g.location, offset: gaugeOffset(g) }));
     const xh = xsHeight(0);
     const png = await canvasPng((ctx, w, h) => drawCrossSection(ctx, w, h, p, { gauges: gaugesXs, loadCases: [], fontScale: XS_FONT }), XS_W, xh);
@@ -114,10 +123,12 @@ export async function buildReport(onProgress = () => { }) {
     for (const v of p.vehicles) {
       const gross = v.axles.reduce((t, a) => t + (Number(a.weight) || 0), 0);
       children.push(h2(`${v.name}${v.description ? ' – ' + v.description : ''}`));
-      if (v.plate || v.notes) children.push(para([v.plate && `Truck/plate: ${v.plate}.`, v.notes].filter(Boolean).join(' ')));
+      const extra = [v.plate && `Truck ID / owner: ${v.plate}.`, v.bumper && `Front bumper to steer axle: ${v.bumper} in. (${ftin(Number(v.bumper) / 12)}).`, v.overallWidth && `Overall width: ${v.overallWidth} in. (${ftin(Number(v.overallWidth) / 12)}).`, v.tirePressure && `Tire pressure: ${v.tirePressure} psi.`, v.notes].filter(Boolean);
+      if (extra.length) children.push(para(extra.join(' ')));
+      const anyDual = v.axles.some(a => a.dual);
       children.push(caption('Table', `${v.name} axle data (gross weight ${gross.toLocaleString()} lb)`));
-      children.push(table(['Axle', 'Spacing from previous (in)', 'Weight (lb)', 'Track c/c (in)', 'Tire width (in)', 'Dual'],
-        v.axles.map((a, i) => [i + 1, i ? a.spacing : '–', a.weight !== '' ? Number(a.weight).toLocaleString() : '', a.track, a.tireWidth, a.dual ? 'Yes' : 'No']).concat([['Total', '', gross.toLocaleString(), '', '', '']]), [1, 2, 3, 4]));
+      children.push(table(['Axle', 'Spacing from previous', 'Weight (lb)', 'Gage c/c (in)', 'Tire width (in)', anyDual ? 'Dual set out-to-out (in)' : 'Dual'],
+        v.axles.map((a, i) => [i + 1, i ? `${a.spacing}" (${ftin(Number(a.spacing) / 12)})` : '–', a.weight !== '' ? Number(a.weight).toLocaleString() : '', a.track, a.tireWidth, a.dual ? (a.dualOut || 'Yes') : (anyDual ? '–' : 'No')]).concat([['Total', '', gross.toLocaleString(), '', '', '']]), [2, 3, 4]));
       const png = await canvasPng((ctx, w, h) => drawTruck(ctx, w, h, v, { fontScale: 2 }), 1600, 640);
       children.push(spacer(), image(png, 600, 240), caption('Figure', `${v.name} axle configuration`));
     }
@@ -131,16 +142,28 @@ export async function buildReport(onProgress = () => { }) {
     children.push(para(`The vehicles crossed the bridge along ${p.loadCases.length} transverse load paths. Crawl-speed passes were used to measure quasi-static response${p.loadCases.some(l => /mph/i.test(l.speed || '') && !/crawl/i.test(l.speed)) ? ', and higher-speed passes were made to evaluate dynamic response' : ''}. Truck position along the bridge was recorded by marking the data file as the front axle crossed reference lines on the deck ${marks}. Each pass was recorded in a separate data file.`));
     if (p.loadCases.length) {
       children.push(caption('Table', 'Load cases'));
-      children.push(table(['Load case', 'Description', 'Vehicle(s)', 'Vehicle C/L from ' + (br.edgeA || 'Edge A') + ' (ft)', 'Speed', 'Passes'],
+      const wl = isCL(p) ? ['Left wheel', 'Right wheel'] : [`${br.edgeA || 'Edge A'}-side wheel`, `${br.edgeB || 'Edge B'}-side wheel`];
+      children.push(table(['Load case', 'Description', 'Vehicle(s)', `${wl[0]} (${posUnit(p)})`, wl[1], 'Speed', 'Passes'],
         p.loadCases.map(lc => {
           const veh = vehicleById((lc.vehicleIds || [])[0]) || p.vehicles[0];
-          return [lc.name, lc.description, (lc.vehicleIds || []).map(id => vehicleById(id)?.name).filter(Boolean).join(', '), fmt(loadCaseWheels(lc, veh).center, 2), lc.speed || 'crawl', p.passes.filter(ps => ps.loadCaseId === lc.id).length];
-        }), [3, 5]));
+          const w = loadCaseWheels(lc, veh);
+          return [lc.name, lc.description, (lc.vehicleIds || []).map(id => vehicleById(id)?.name).filter(Boolean).join(', '), fmtPos(p, w.a), fmtPos(p, w.b), lc.speed || 'crawl', p.passes.filter(ps => ps.loadCaseId === lc.id).length];
+        }), [3, 4, 6]));
       const lh = xsHeight(p.loadCases.length);
       const png = await canvasPng((ctx, w, h) => drawCrossSection(ctx, w, h, p, { gauges: [], labels: false, fontScale: XS_FONT }), XS_W, lh);
       children.push(spacer(), image(png, 620, Math.round(620 * lh / XS_W)), caption('Figure', `Transverse load paths (looking ${br.lookDir || 'up-station'})`));
     }
-    if (p.passes.length) {
+    const t = p.test;
+    const cond = [['Test start', t.startTime], ['Crew', t.crew], ['Weather', t.weather], ['Air temperature (°F)', t.temperature], ['Deck surface temperature (°F)', t.deckTemp], ['Data acquisition', t.dataSystem], ['DAQ serial', t.daqSerial], ['Excitation / gauge factor', t.excitation], ['Zero / balance time', t.zeroTime], ['Gauge length', t.gaugeLength], ['Direction of travel', t.direction], ['Traffic control', t.trafficControl], ['File naming', t.fileNaming],
+      ...(t.custom || []).filter(c => c.label || c.value).map(c => [c.label, c.value])].filter(r => r[1] !== '' && r[1] != null);
+    if (cond.length) { children.push(caption('Table', 'Test conditions')); children.push(table(['Item', 'Value'], cond)); }
+    const runs = (p.runs || []);
+    if (runs.length) {
+      children.push(caption('Table', 'Run log'));
+      const tm = v => v === 'skipped' ? 'skipped' : v ? new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+      children.push(table(['Run', 'Load case', 'Speed', 'Start', 'Stop', 'Data file', 'Notes'],
+        runs.map(r => { const lc = loadCaseById(r.loadCaseId); const ps = p.passes.find(x => x.id === r.passId); return [r.no, lc?.name || '', r.speed || lc?.speed || '', tm(r.tStart), tm(r.tStop), ps ? ps.fileName : '', r.notes || '']; })));
+    } else if (p.passes.length) {
       children.push(caption('Table', 'Test passes'));
       children.push(table(['Pass', 'Load case', 'Data file', 'Start time', 'Duration (s)', 'Vehicles'],
         p.passes.map(ps => [ps.name, loadCaseById(ps.loadCaseId)?.name || '', ps.fileName, passStart(ps) ? passStart(ps).toLocaleTimeString() : '', fmt(ps.duration, 0), (ps.vehicles || []).map(v => vehicleById(v.vehicleId)?.name).filter(Boolean).join(', ')]), [4]));
@@ -155,7 +178,9 @@ export async function buildReport(onProgress = () => { }) {
     children.push(para(zm));
     children.push(para(`Truck position was obtained by linear interpolation between the time marks recorded as the front axle crossed each reference line. Positions are given for the front axle, measured from the start of the bridge.`));
     children.push(para(br.type === 'slab'
-      ? `Load distribution was evaluated with the equivalent strip width method: the area under the transverse profile of bottom-of-slab strains at ${br.distSection || 'the critical section'} divided by the peak strain, at the time the vehicle produced the maximum response.`
+      ? (p.gauges.some(g => g.dist && Number(g.thickness) > 0)
+        ? `Load distribution was evaluated with the equivalent strip width method using the bottom-of-slab strains at ${br.distSection || 'the critical section'}. Because the slab thickness varies across the width, each strain was converted to a moment per unit width, mᵢ = E·εᵢ·hᵢ²/6, where hᵢ is the slab thickness at the gauge. This treats each gauge location as an uncracked rectangular section with the neutral axis at mid-depth. The total moment was obtained by summing mᵢ over each gauge's tributary width Δxᵢ (half the distance to the adjacent gauges, limited at the deck edges), and the equivalent strip width was calculated as E_strip = Σ(εᵢ·hᵢ²·Δxᵢ) / (ε·h²)max, using the gauge with the largest product ε·h², which is not necessarily the gauge with the largest strain. The strains were taken at the instant of ${set.distMethod === 'maxSum' ? 'the largest total moment' : 'the largest ε·h² at any gauge'}, separately for each vehicle. Because moment varies with h², the results are sensitive to the slab thicknesses used: a 10% error in thickness gives about a 20% error in moment.`
+        : `Load distribution was evaluated with the equivalent strip width method: E_strip = Σ(εᵢ·Δxᵢ) / ε_max, using the bottom-of-slab strains at ${br.distSection || 'the critical section'} and each gauge's tributary width Δxᵢ (half the distance to the adjacent gauges, limited at the deck edges). The slab thickness was taken as uniform, so the strains are proportional to the moments. Strains were taken at the time the vehicle produced the maximum response, separately for each vehicle.`)
       : `Load distribution was calculated from the bottom-flange strains of all girders at ${br.distSection || 'a single cross-section'}, taken at the instant of ${set.distMethod === 'maxSum' ? 'the largest total strain' : 'peak strain'}. The distribution factor for each girder is its strain divided by the sum of all girder strains at that instant. A separate distribution was calculated for each vehicle.`));
     children.push(para(`Stresses were calculated as σ = E·ε with E = ${Number(br.E).toLocaleString()} ksi. Tensile strain is positive.`));
   }
@@ -202,9 +227,16 @@ export async function buildReport(onProgress = () => { }) {
         if (res.dist) {
           const d = res.dist;
           children.push(caption('Table', `${passLabel(pass)}, ${vname}: load distribution at ${br.distSection || 'section'} (t = ${fmt(d.tPeak, 2)} s${isFinite(d.xPeak) ? ', front axle at ' + fmt(d.xPeak, 1) + ' ft' : ''})`));
-          children.push(table(['Gauge', 'Girder', 'Offset (ft)', 'Strain (µε)', 'Distribution (%)'],
-            d.rows.map(x => [x.name, x.girder || '', fmt(x.offset, 2), fmt(x.strain, 1), fmt(x.df * 100, 1)]).concat([['Sum', '', '', fmt(d.sum, 1), '100.0']]), [2, 3, 4]));
-          if (br.type === 'slab') children.push(para(`Equivalent strip width = ${fmt(d.stripWidth, 2)} ft.`, { bold: true }));
+          if (d.slab) {
+            const head = ['Gauge', `Position (${posUnit(p)})`, 'Strain (µε)', ...(d.useH ? ['h (in)', 'ε·h² (×10³ µε·in²)', 'm (kip-ft/ft)'] : []), 'Δx (ft)', 'Share (%)'];
+            children.push(table(head, d.rows.map(x => [x.name + (x === d.governing ? ' (max)' : ''), fmtPos(p, x.offset), fmt(x.strain, 1), ...(d.useH ? [fmt(x.h, 2), fmt(x.w / 1000, 2), fmt(x.m, 3)] : []), fmt(x.trib, 2), fmt(x.df * 100, 1)]), head.map((_, i) => i).filter(i => i >= 1)));
+            const t = slabSummaryText(p, d);
+            children.push(para(t[0] + '.', { bold: true }));
+            t.slice(1).forEach(line => children.push(para(line + '.', { size: 20 })));
+          } else {
+            children.push(table(['Gauge', 'Girder', `Position (${posUnit(p)})`, 'Strain (µε)', 'Distribution (%)'],
+              d.rows.map(x => [x.name, x.girder || '', fmtPos(p, x.offset), fmt(x.strain, 1), fmt(x.df * 100, 1)]).concat([['Sum', '', '', fmt(d.sum, 1), '100.0']]), [2, 3, 4]));
+          }
         }
         const pkRows = strainSet.map(g => { const pk = res.peaks[g.serial]; return pk ? [gaugeName(g), [g.girder, g.location].filter(Boolean).join(' '), fmt(pk.max, 1), fmt(pk.min, 1), fmt(Math.max(Math.abs(pk.max), Math.abs(pk.min)) * r.E * 1e-6, 2)] : null; }).filter(Boolean);
         if (pkRows.length && rep.includePeakTables !== false) {
@@ -300,6 +332,11 @@ export async function buildReport(onProgress = () => { }) {
   if (on('observations')) {
     const notes = [...p.log].filter(e => e.kind !== 'photo').sort((a, b) => new Date(a.ts) - new Date(b.ts));
     children.push(h1(`${++sec}. Field Observations`));
+    const ck = (p.checklist || []).filter(c => c.text);
+    if (ck.length) {
+      children.push(caption('Table', 'Setup checklist'));
+      children.push(table(['Item', 'Done', 'Time'], ck.map(c => [c.text, c.done ? 'Yes' : 'No', c.done && c.ts ? new Date(c.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''])));
+    }
     if (notes.length) {
       children.push(caption('Table', 'Field log'));
       children.push(table(['Time', 'Type', 'Load case', 'Note'], notes.map(e => [new Date(e.ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }), e.tag, loadCaseById(e.loadCaseId)?.name || '', [e.gauge ? `[${e.gauge}]` : '', e.text].filter(Boolean).join(' ')])));
