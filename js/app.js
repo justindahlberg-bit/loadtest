@@ -63,6 +63,7 @@ function renderReport(main) {
       <label>Readings averaged at start/end<input data-bind="settings.zeroN" data-type="num" inputmode="numeric"></label>
       <label>Distribution taken at<select data-bind="settings.distMethod">${opts([['maxGauge', 'Time of peak single-gauge strain'], ['maxSum', 'Time of peak total strain']])}</select></label>
       <label>Stress units<select data-bind="settings.stressUnit">${opts([['ksi', 'ksi'], ['psi', 'psi']])}</select></label>
+      <label>Gauge-extension correction<select data-bind="settings.extFormula">${opts([['3/L', 'Strain × 3 / L (standard)'], ['L/3', 'Strain × L / 3']])}</select></label>
     </div></div>`;
   if (rep.includeDefl === undefined) rep.includeDefl = true;
   if (rep.includePeakTables === undefined) rep.includePeakTables = true;

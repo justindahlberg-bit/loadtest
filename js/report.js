@@ -1,9 +1,9 @@
 // Word (.docx) report generator. Uses the docx library loaded as window.docx.
-import { state, getPassData, gaugeOffset, groupKey, sortGauges, isStrain, isDefl, gaugeName, loadCaseById, vehicleById, shortSerial } from './state.js';
+import { state, getPassData, gaugeOffset, groupKey, sortGauges, isStrain, isDefl, gaugeName, loadCaseById, vehicleById, shortSerial, strainFactor, extLength } from './state.js';
 import { db } from './db.js';
 import { processPass, buildSpec, passStart, passLabel, distSeries, slabSummaryText } from './passes.js';
 import { plotPng, PALETTE } from './plot.js';
-import { drawCrossSection, drawTruck, canvasPng, loadCaseWheels, drawDistribution } from './draw.js';
+import { drawCrossSection, drawTruck, canvasPng, canvasPngTrim, loadCaseWheels, drawDistribution } from './draw.js';
 import { fmt, ftin, bridgeLength, isCL, fmtPos, posUnit } from './calc.js';
 
 export const REPORT_SECTIONS = [
@@ -111,8 +111,8 @@ export async function buildReport(onProgress = () => { }) {
     children.push(table(head, rows, [0, head.indexOf(`Position (${posUnit(p)})`)]));
     const gaugesXs = p.gauges.filter(g => !['unused', 'removed', 'replaced'].includes(g.status)).map(g => ({ serial: g.serial, short: g.label || shortSerial(g.serial), type: g.type, location: g.location, offset: gaugeOffset(g) }));
     const xh = xsHeight(0);
-    const png = await canvasPng((ctx, w, h) => drawCrossSection(ctx, w, h, p, { gauges: gaugesXs, loadCases: [], fontScale: XS_FONT }), XS_W, xh);
-    children.push(spacer(), image(png, 620, Math.round(620 * xh / XS_W)), caption('Figure', `Cross-section showing gauge locations (looking ${br.lookDir || 'up-station'}). Circles are strain gauges, triangles are deflection transducers.`));
+    const png = await canvasPngTrim((ctx, w, h) => drawCrossSection(ctx, w, h, p, { gauges: gaugesXs, loadCases: [], fontScale: XS_FONT }), XS_W, xh);
+    children.push(spacer(), image(png.data, 620, Math.round(620 * png.height / png.width)), caption('Figure', `Cross-section showing gauge locations (looking ${br.lookDir || 'up-station'}). Circles are strain gauges, triangles are deflection transducers.`));
   }
 
   // ---- 4 Vehicles ----
@@ -150,8 +150,8 @@ export async function buildReport(onProgress = () => { }) {
           return [lc.name, lc.description, (lc.vehicleIds || []).map(id => vehicleById(id)?.name).filter(Boolean).join(', '), fmtPos(p, w.a), fmtPos(p, w.b), lc.speed || 'crawl', p.passes.filter(ps => ps.loadCaseId === lc.id).length];
         }), [3, 4, 6]));
       const lh = xsHeight(p.loadCases.length);
-      const png = await canvasPng((ctx, w, h) => drawCrossSection(ctx, w, h, p, { gauges: [], labels: false, fontScale: XS_FONT }), XS_W, lh);
-      children.push(spacer(), image(png, 620, Math.round(620 * lh / XS_W)), caption('Figure', `Transverse load paths (looking ${br.lookDir || 'up-station'})`));
+      const png = await canvasPngTrim((ctx, w, h) => drawCrossSection(ctx, w, h, p, { gauges: [], labels: false, fontScale: XS_FONT }), XS_W, lh);
+      children.push(spacer(), image(png.data, 620, Math.round(620 * png.height / png.width)), caption('Figure', `Transverse load paths (looking ${br.lookDir || 'up-station'})`));
     }
     const t = p.test;
     const cond = [['Test start', t.startTime], ['Crew', t.crew], ['Weather', t.weather], ['Air temperature (°F)', t.temperature], ['Deck surface temperature (°F)', t.deckTemp], ['Data acquisition', t.dataSystem], ['DAQ serial', t.daqSerial], ['Excitation / gauge factor', t.excitation], ['Zero / balance time', t.zeroTime], ['Gauge length', t.gaugeLength], ['Direction of travel', t.direction], ['Traffic control', t.trafficControl], ['File naming', t.fileNaming],
@@ -182,6 +182,12 @@ export async function buildReport(onProgress = () => { }) {
         ? `Load distribution was evaluated with the equivalent strip width method using the bottom-of-slab strains at ${br.distSection || 'the critical section'}. Because the slab thickness varies across the width, each strain was converted to a moment per unit width, mᵢ = E·εᵢ·hᵢ²/6, where hᵢ is the slab thickness at the gauge. This treats each gauge location as an uncracked rectangular section with the neutral axis at mid-depth. The total moment was obtained by summing mᵢ over each gauge's tributary width Δxᵢ (half the distance to the adjacent gauges, limited at the deck edges), and the equivalent strip width was calculated as E_strip = Σ(εᵢ·hᵢ²·Δxᵢ) / (ε·h²)max, using the gauge with the largest product ε·h², which is not necessarily the gauge with the largest strain. The strains were taken at the instant of ${set.distMethod === 'maxSum' ? 'the largest total moment' : 'the largest ε·h² at any gauge'}, separately for each vehicle. Because moment varies with h², the results are sensitive to the slab thicknesses used: a 10% error in thickness gives about a 20% error in moment.`
         : `Load distribution was evaluated with the equivalent strip width method: E_strip = Σ(εᵢ·Δxᵢ) / ε_max, using the bottom-of-slab strains at ${br.distSection || 'the critical section'} and each gauge's tributary width Δxᵢ (half the distance to the adjacent gauges, limited at the deck edges). The slab thickness was taken as uniform, so the strains are proportional to the moments. Strains were taken at the time the vehicle produced the maximum response, separately for each vehicle.`)
       : `Load distribution was calculated from the bottom-flange strains of all girders at ${br.distSection || 'a single cross-section'}, taken at the instant of ${set.distMethod === 'maxSum' ? 'the largest total strain' : 'peak strain'}. The distribution factor for each girder is its strain divided by the sum of all girder strains at that instant. A separate distribution was calculated for each vehicle.`));
+    const extG = p.gauges.filter(g => isStrain(g) && strainFactor(g) !== 1);
+    if (extG.length) {
+      const Ls = [...new Set(extG.map(g => extLength(g)))];
+      const f = set.extFormula === 'L/3' ? 'L/3' : '3/L';
+      children.push(para(`Strain transducers fitted with gauge extensions (L = ${Ls.join(', ')} in.) were corrected for the extended gauge length. The data system reports strain for the standard 3-in. gauge length, so the readings were multiplied by ${f} (${Ls.map(L => `${fmt(f === '3/L' ? 3 / L : L / 3, 3)} for L = ${L} in.`).join('; ')}). All strains and stresses in this report include this correction. Load distribution percentages are not affected, because ${new Set(extG.map(g => strainFactor(g))).size === 1 && extG.length === p.gauges.filter(isStrain).length ? 'the same factor applies to every gauge' : 'they are ratios of corrected strains'}.`));
+    }
     children.push(para(`Stresses were calculated as σ = E·ε with E = ${Number(br.E).toLocaleString()} ksi. Tensile strain is positive.`));
   }
 
@@ -216,13 +222,13 @@ export async function buildReport(onProgress = () => { }) {
           if (!spec.series.length) continue;
           if (!usePos) spec.series.forEach(s => { s.y = s.y.subarray(res.i0, res.i1); }), spec.x = r.time.subarray(res.i0, res.i1);
           const png = await plotPng(spec);
-          children.push(image(png, 620, 318), caption('Figure', `${passLabel(pass)}, ${vname}: strain vs ${usePos ? 'front axle position' : 'time'} – ${gname}`));
+          children.push(image(png.data, 620, Math.round(620 * png.height / png.width)), caption('Figure', `${passLabel(pass)}, ${vname}: strain vs ${usePos ? 'front axle position' : 'time'} – ${gname}`));
         }
         if (rep.includeDefl !== false && r.gauges.some(isDefl)) {
           const spec = buildSpec(pass, r, { x, vehicle: vi, qty: 'defl', group: '__all' }, { noLog: true, noClickLabels: true });
           if (!usePos) spec.series.forEach(s => { s.y = s.y.subarray(res.i0, res.i1); }), spec.x = r.time.subarray(res.i0, res.i1);
           const png = await plotPng(spec);
-          children.push(image(png, 620, 318), caption('Figure', `${passLabel(pass)}, ${vname}: deflection vs ${usePos ? 'front axle position' : 'time'}`));
+          children.push(image(png.data, 620, Math.round(620 * png.height / png.width)), caption('Figure', `${passLabel(pass)}, ${vname}: deflection vs ${usePos ? 'front axle position' : 'time'}`));
         }
         if (res.dist) {
           const d = res.dist;

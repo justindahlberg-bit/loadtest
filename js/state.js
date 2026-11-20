@@ -22,12 +22,12 @@ export function newProject(name) {
     },
     test: {
       crew: '', weather: '', temperature: '', gaugeLength: '', dataSystem: 'BDI STS-Wifi / STS-Live', purpose: '',
-      startTime: '', deckTemp: '', daqSerial: '', excitation: '', gaugeFactor: '', zeroTime: '', direction: '', trafficControl: '', fileNaming: '', custom: [],
+      extLength: '', startTime: '', deckTemp: '', daqSerial: '', excitation: '', gaugeFactor: '', zeroTime: '', direction: '', trafficControl: '', fileNaming: '', custom: [],
     },
     marks: { first: -20, spacing: 20, custom: '' },
     gauges: [], vehicles: [], loadCases: [], passes: [], log: [], runs: [],
     checklist: DEFAULT_CHECKLIST.map(text => ({ id: uid(), text, done: false, ts: '' })),
-    settings: { zeroMode: 'linear', zeroN: 10, distMethod: 'maxGauge', stressUnit: 'ksi', groupBy: 'girder', sortBy: 'order' },
+    settings: { zeroMode: 'linear', zeroN: 10, distMethod: 'maxGauge', stressUnit: 'ksi', groupBy: 'girder', sortBy: 'order', extFormula: '3/L' },
     report: { title: 'Bridge Load Test Report', author: '', company: '', client: '', date: today, intro: '', conclusions: '', groupBy: 'girder', sections: {} },
   };
 }
@@ -136,6 +136,22 @@ export function sortGauges(list, by) {
 }
 
 export const isStrain = g => /strain/i.test(g.type || '');
+
+// Gauge extensions: BDI strain readings assume the standard 3-in. gauge length. With an extension the
+// effective gauge length is L, so readings are scaled by 3/L (or L/3 if the test's setting says so).
+// Each gauge can override the test-wide length (enter 3 for a gauge without an extension).
+export const STD_GAUGE_LENGTH = 3;
+export function extLength(g) {
+  if (!isStrain(g)) return NaN;
+  const own = g.ext !== '' && g.ext != null ? Number(g.ext) : NaN;
+  const L = isFinite(own) ? own : Number(state.project.test.extLength);
+  return L > 0 ? L : NaN;
+}
+export function strainFactor(g) {
+  const L = extLength(g);
+  if (!(L > 0) || L === STD_GAUGE_LENGTH) return 1;
+  return state.project.settings.extFormula === 'L/3' ? L / STD_GAUGE_LENGTH : STD_GAUGE_LENGTH / L;
+}
 export const isDefl = g => /displ/i.test(g.type || '');
 export const shortSerial = s => String(s).replace(/_\d+[A-Z]?$/i, '');
 export const gaugeName = g => g.label ? `${g.label} (${shortSerial(g.serial)})` : shortSerial(g.serial);
@@ -143,7 +159,7 @@ export const gaugeName = g => g.label ? `${g.label} (${shortSerial(g.serial)})` 
 // "B2944_18B" → "2944", "SP0360_17A" → "360", "4814" → "4814": lets a typed serial match the file's channel name
 export const serialKey = s => String(s || '').toUpperCase().trim().replace(/_.*$/, '').replace(/^[A-Z]+/, '').replace(/^0+(?=\d)/, '');
 
-export const newGauge = (o = {}) => ({ serial: '', type: 'Strain', unit: 'ue', label: '', span: '', girder: '', section: '', xLong: '', location: '', plannedOffset: '', offset: '', thickness: '', dist: false, status: 'ok', replaces: '', notes: '', order: 0, ...o });
+export const newGauge = (o = {}) => ({ serial: '', type: 'Strain', unit: 'ue', label: '', span: '', girder: '', section: '', xLong: '', location: '', plannedOffset: '', offset: '', thickness: '', ext: '', dist: false, status: 'ok', replaces: '', notes: '', order: 0, ...o });
 
 // Ensure every channel from a pass exists in the gauge map. A planned gauge whose typed serial
 // matches the channel (e.g. "2944" or "B2944" for channel "B2944_18B") takes the file's full name.

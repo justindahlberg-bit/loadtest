@@ -1,5 +1,5 @@
 // Data & plots tab: TDMS import, processing, plots and results.
-import { state, save, uid, getPassData, registerChannels, gaugeOffset, groupKey, sortGauges, isStrain, isDefl, gaugeName, loadCaseById, vehicleById } from './state.js';
+import { state, save, uid, getPassData, registerChannels, gaugeOffset, groupKey, sortGauges, isStrain, isDefl, gaugeName, loadCaseById, vehicleById, strainFactor, extLength } from './state.js';
 import { db } from './db.js';
 import { parseTdms, toPass } from './tdms.js';
 import { zeroChannel, vehicleWindows, positionAt, indexRange, channelPeaks, distribution, speedMph, bridgeLength, fmt, ftin, fmtPos, posUnit, toEdge } from './calc.js';
@@ -133,7 +133,10 @@ export async function processPass(pass) {
   const series = {};
   for (const ch of data.channels) {
     if (!gauges.find(g => g.serial === ch.serial)) continue;
-    series[ch.serial] = zeroChannel(time, ch.data, mode, p.settings.zeroN || 10);
+    const z = zeroChannel(time, ch.data, mode, p.settings.zeroN || 10);
+    const k = strainFactor(gauges.find(g => g.serial === ch.serial));
+    if (k !== 1) for (let i = 0; i < z.length; i++) z[i] *= k; // gauge-extension correction
+    series[ch.serial] = z;
   }
   const wins = vehicleWindows(pass, p, time);
   const distGauges = gauges.filter(g => g.dist && isStrain(g)).map(g => ({ serial: g.serial, name: gaugeName(g), girder: g.girder, offset: gaugeOffset(g), x: toEdge(p, gaugeOffset(g)), h: g.thickness }))
@@ -157,6 +160,21 @@ export async function processPass(pass) {
     return { win: w, i0, i1, pos, peaks, dist, speed: speedMph(w.knots), vehicle: vehicleById(w.vehicleId) };
   });
   return { time, series, gauges, wins, results, E, mode };
+}
+
+// "21 in. extensions: strains × 0.143 (3/L)" — or a list when gauges differ
+export function extSummary(gauges) {
+  const p = P();
+  const groups = new Map();
+  for (const g of gauges.filter(isStrain)) {
+    const L = extLength(g), k = strainFactor(g);
+    const key = k === 1 ? 'none' : `${L}`;
+    if (!groups.has(key)) groups.set(key, { L, k, n: 0 });
+    groups.get(key).n++;
+  }
+  if (!groups.size) return '–';
+  const f = p.settings.extFormula === 'L/3' ? 'L/3' : '3/L';
+  return [...groups.values()].map(x => x.k === 1 ? `${x.n} gauge${x.n > 1 ? 's' : ''} without extensions (no correction)` : `${x.n} gauge${x.n > 1 ? 's' : ''} with ${x.L} in. extensions: strains × ${fmt(x.k, 3)} (${f})`).join('; ');
 }
 
 export const passLabel = pass => {
@@ -227,7 +245,8 @@ async function renderDetail() {
       <label>Notes<input data-bind="passes.${pi}.notes" placeholder="e.g. third truck deviated west"></label>
     </div>
     <dl class="kv" style="margin-top:10px"><dt>Started</dt><dd>${st ? st.toLocaleString() : '–'} ${esc(pass.title ? '· ' + pass.title : '')}</dd>
-      <dt>Samples</dt><dd>${pass.nSamples} at ${pass.sampleRate} Hz (${fmt(pass.duration, 1)} s)</dd><dt>Marks</dt><dd>${pass.clicks.length ? pass.clicks.map(c => fmt(c.t, 1)).join(', ') + ' s' : 'none — set vehicle on/off times below'}</dd></dl>
+      <dt>Samples</dt><dd>${pass.nSamples} at ${pass.sampleRate} Hz (${fmt(pass.duration, 1)} s)</dd><dt>Marks</dt><dd>${pass.clicks.length ? pass.clicks.map(c => fmt(c.t, 1)).join(', ') + ' s' : 'none — set vehicle on/off times below'}</dd>
+      <dt>Extensions</dt><dd>${extSummary(activeGauges(pass))}</dd></dl>
   </div>
   <div class="card"><h3 style="margin-top:0">Truck position</h3>
     <div class="grid">
@@ -464,7 +483,7 @@ async function exportCsv(pass) {
   const r = await processPass(pass);
   if (!r) return;
   const g = r.gauges;
-  const head = ['Time (s)', 'Front axle position (ft)', ...g.map(x => `${x.serial} (${isDefl(x) ? 'in' : 'ue'})`)];
+  const head = ['Time (s)', 'Front axle position (ft)', ...g.map(x => `${x.serial} (${isDefl(x) ? 'in' : strainFactor(x) !== 1 ? `ue x${fmt(strainFactor(x), 3)} ext. corr.` : 'ue'})`)];
   const lines = [head.join(',')];
   for (let i = 0; i < r.time.length; i++) {
     const t = r.time[i];

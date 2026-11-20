@@ -127,7 +127,8 @@ export function renderBridge(main) {
       <label>DAQ serial<input data-bind="test.daqSerial"></label>
       <label>Excitation / gauge factor<input data-bind="test.excitation"></label>
       <label>Zero / balance time<input data-bind="test.zeroTime"></label>
-      <label>Gauge length / extensions<input data-bind="test.gaugeLength" placeholder='e.g. 15" extensions'></label>
+      <label>Gauge extension length L (in) – blank if none<input data-bind="test.extLength" data-type="num" inputmode="decimal" placeholder="e.g. 15 or 21"></label>
+      <label>Gauge length / extensions (description)<input data-bind="test.gaugeLength" placeholder='e.g. 15" extensions'></label>
       <label>Truck direction of travel<input data-bind="test.direction" placeholder="Northbound"></label>
       <label>Traffic control<input data-bind="test.trafficControl"></label>
       <label>File naming convention<input data-bind="test.fileNaming"></label>
@@ -217,7 +218,7 @@ export function renderGauges(main) {
     for (const g of list) { const k = s.groupBy === 'none' ? '' : groupKey(g, s.groupBy); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(g); }
     const cols = 15;
     let html = `<thead><tr><th>#</th><th>Serial</th><th>Type</th><th>Label</th><th>Span</th>${isGirder ? '<th>Girder</th>' : ''}<th>Section</th><th title="Distance along the bridge from the start of the bridge">Along bridge (ft)</th><th>Location</th>
-      <th>Planned (${posUnit(p)})</th><th>Measured</th>${isSlab ? '<th title="Slab thickness at the gauge, for the equivalent strip calculation">Slab h (in)</th>' : ''}<th title="Use for load distribution">Dist.</th><th>Status</th><th>Replaces</th><th>Notes</th><th></th></tr></thead><tbody>`;
+      <th>Planned (${posUnit(p)})</th><th>Measured</th>${isSlab ? '<th title="Slab thickness at the gauge, for the equivalent strip calculation">Slab h (in)</th>' : ''}<th title="Extension length for this gauge; blank uses the test value on the Bridge tab, 3 = no extension">Ext. L (in)</th><th title="Use for load distribution">Dist.</th><th>Status</th><th>Replaces</th><th>Notes</th><th></th></tr></thead><tbody>`;
     for (const [k, gs] of groups) {
       if (k) html += `<tr class="group-row"><td colspan="${cols}">${esc(k)} <span class="muted">(${gs.length})</span></td></tr>`;
       for (const g of gs) {
@@ -239,6 +240,7 @@ export function renderGauges(main) {
           <td><input data-bind="gauges.${i}.plannedOffset" data-type="pos" style="width:80px"></td>
           <td><input data-bind="gauges.${i}.offset" data-type="pos" style="width:90px" placeholder="${esc(auto)}"></td>
           ${isSlab ? `<td><input data-bind="gauges.${i}.thickness" data-type="num" inputmode="decimal" style="width:64px"></td>` : ''}
+          <td>${isStrain(g) ? `<input data-bind="gauges.${i}.ext" data-type="num" inputmode="decimal" style="width:60px" placeholder="${esc(p.test.extLength !== '' && p.test.extLength != null ? String(p.test.extLength) : '—')}">` : ''}</td>
           <td><input type="checkbox" data-bind="gauges.${i}.dist"></td>
           <td><select data-bind="gauges.${i}.status" style="width:100px">${opts([['ok', 'OK'], ['bad', 'Bad'], ['replaced', 'Replaced'], ['removed', 'Removed'], ['unused', 'Unused ch.']])}</select></td>
           <td><select data-replaces="${i}" style="width:110px">${opts([['', '—'], ...p.gauges.filter(o => o !== g && o.serial).map(o => o.serial)], g.replaces)}</select></td>
@@ -282,7 +284,7 @@ export function renderGauges(main) {
       g.replaces = sel.value;
       const old = p.gauges.find(o => o.serial === sel.value);
       if (old) {
-        for (const k of ['span', 'girder', 'section', 'xLong', 'location', 'plannedOffset', 'offset', 'thickness', 'dist', 'label']) g[k] = old[k];
+        for (const k of ['span', 'girder', 'section', 'xLong', 'location', 'plannedOffset', 'offset', 'thickness', 'ext', 'dist', 'label']) g[k] = old[k];
         g.order = old.order;
         old.status = 'replaced';
         old.notes = (old.notes ? old.notes + '; ' : '') + 'replaced by ' + (g.serial || g.label);

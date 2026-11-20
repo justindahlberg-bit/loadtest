@@ -133,23 +133,28 @@ export function drawCrossSection(ctx, w, h, project, opt = {}) {
     ctx.fill();
   });
   // gauge labels: stacked under each offset
+  let maxStack = 0;
   if (opt.labels !== false) {
     const byX = new Map();
     gauges.forEach(gg => { const x = E(gg.offset); if (!isFinite(x)) return; const k = Math.round(x * 10); if (!byX.has(k)) byX.set(k, []); byX.get(k).push(gg); });
     ctx.font = f(10); ctx.textBaseline = 'top'; ctx.textAlign = 'center';
     for (const list of byX.values()) {
+      maxStack = Math.max(maxStack, list.length);
       list.forEach((gg, k) => {
         ctx.fillStyle = /displ/i.test(gg.type) ? '#d62728' : th.muted;
         ctx.fillText(gg.short || gg.serial, XD(gg.offset), labelRowBase + k * 12 * s);
       });
     }
   }
-  // Edge labels and width
-  ctx.fillStyle = th.muted; ctx.font = f(11); ctx.textBaseline = 'bottom';
-  ctx.textAlign = 'left'; ctx.fillText(br.edgeA || 'Edge A', X(0), h - 4 * s);
-  ctx.textAlign = 'right'; ctx.fillText(br.edgeB || 'Edge B', X(width), h - 4 * s);
-  ctx.textAlign = 'center'; ctx.fillText(`Deck width ${ftin(width)} · looking ${br.lookDir || 'up-station'}`, w / 2, h - 4 * s);
+  // Edge labels and width, placed just below the lowest part of the drawing
+  const contentBottom = maxStack ? labelRowBase + maxStack * 12 * s : deckY + deckT + girderH + (girders.length ? 18 * s : 2 * s);
+  const ly = contentBottom + 6 * s;
+  ctx.fillStyle = th.muted; ctx.font = f(11); ctx.textBaseline = 'top';
+  ctx.textAlign = 'left'; ctx.fillText(br.edgeA || 'Edge A', X(0), ly);
+  ctx.textAlign = 'right'; ctx.fillText(br.edgeB || 'Edge B', X(width), ly);
+  ctx.textAlign = 'center'; ctx.fillText(`Deck width ${ftin(width)} · looking ${br.lookDir || 'up-station'}`, w / 2, ly);
   ctx.restore();
+  return ly + 18 * s; // height actually used (lets report images be trimmed)
 }
 
 // Height (CSS px at scale 1) that fits a cross-section drawing
@@ -328,6 +333,21 @@ export async function canvasPng(drawFn, width, height) {
   drawFn(c.getContext('2d'), width, height);
   const blob = await new Promise(r => c.toBlob(r, 'image/png'));
   return new Uint8Array(await blob.arrayBuffer());
+}
+
+// Like canvasPng, but trims the empty space below the drawing (drawFn returns the height it used).
+// Returns { data, width, height }.
+export async function canvasPngTrim(drawFn, width, height) {
+  const c = document.createElement('canvas'); c.width = width; c.height = height;
+  const used = drawFn(c.getContext('2d'), width, height);
+  let out = c, hh = height;
+  if (used > 0 && used < height) {
+    hh = Math.ceil(used);
+    out = document.createElement('canvas'); out.width = width; out.height = hh;
+    out.getContext('2d').drawImage(c, 0, 0);
+  }
+  const blob = await new Promise(r => out.toBlob(r, 'image/png'));
+  return { data: new Uint8Array(await blob.arrayBuffer()), width, height: hh };
 }
 
 // Draw to a visible canvas at device pixel ratio

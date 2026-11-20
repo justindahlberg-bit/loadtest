@@ -54,7 +54,8 @@ export function drawPlot(ctx, width, height, spec, opt = {}) {
   ctx.fillStyle = th.bg; ctx.fillRect(0, 0, width, height);
   const e = extents(spec, opt.xRange);
   if (opt.yRange) { e.ymin = opt.yRange[0]; e.ymax = opt.yRange[1]; }
-  const L = 64 * scale, R = 14 * scale, T = (spec.title ? 30 : 12) * scale, B = 44 * scale;
+  const below = opt.legend === 'below' ? legendLayout(ctx, spec, width - 64 * scale - 14 * scale, scale) : null;
+  const L = 64 * scale, R = 14 * scale, T = (spec.title ? 30 : 12) * scale, B = 44 * scale + (below ? below.height : 0);
   const W = Math.max(10, width - L - R), H = Math.max(10, height - T - B);
   const sx = x => L + (x - e.xmin) / (e.xmax - e.xmin || 1) * W;
   const sy = y => T + H - (y - e.ymin) / (e.ymax - e.ymin || 1) * H;
@@ -79,7 +80,7 @@ export function drawPlot(ctx, width, height, spec, opt = {}) {
   if (e.ymin < 0 && e.ymax > 0) { ctx.strokeStyle = th.axis; ctx.beginPath(); const y = Math.round(sy(0)) + 0.5; ctx.moveTo(L, y); ctx.lineTo(L + W, y); ctx.stroke(); }
   // axis labels
   ctx.fillStyle = th.fg; ctx.font = f(12);
-  ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillText(spec.xLabel || '', L + W / 2, height - 4 * scale);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillText(spec.xLabel || '', L + W / 2, T + H + 40 * scale);
   ctx.save(); ctx.translate(14 * scale, T + H / 2); ctx.rotate(-Math.PI / 2); ctx.textBaseline = 'middle'; ctx.fillText(spec.yLabel || '', 0, 0); ctx.restore();
 
   // clip to plot area
@@ -125,8 +126,21 @@ export function drawPlot(ctx, width, height, spec, opt = {}) {
   ctx.restore();
   ctx.strokeStyle = th.axis; ctx.lineWidth = 1; ctx.strokeRect(L + 0.5, T + 0.5, W, H);
 
-  // legend inside plot (report images only)
-  if (opt.legend) {
+  // legend below the plot (report images): keeps the whole strain history visible
+  if (below) {
+    const { items, cols, colW, lh } = below;
+    const top = T + H + 50 * scale;
+    ctx.font = f(11);
+    items.forEach((s, k) => {
+      const c = k % cols, r = Math.floor(k / cols);
+      const x = L + c * colW, y = top + r * lh + lh / 2;
+      ctx.strokeStyle = s.color; ctx.lineWidth = 2 * scale; ctx.setLineDash((s.dash || []).map(d => d * scale));
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + 22 * scale, y); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = th.fg; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillText(s.name, x + 26 * scale, y);
+    });
+  }
+  // legend inside plot
+  if (opt.legend === true) {
     const items = spec.series.filter(s => !s.hidden && s.name);
     ctx.font = f(11);
     const colW = Math.max(...items.map(s => ctx.measureText(s.name).width), 30) + 34 * scale;
@@ -154,13 +168,31 @@ function fmtTick(v) {
   return String(Number(v.toPrecision(4)));
 }
 
-// Render a plot to PNG bytes (for the Word report)
-export async function plotPng(spec, width = 1600, height = 820) {
+// Legend rows laid out under the plot area
+function legendLayout(ctx, spec, plotW, scale) {
+  const items = spec.series.filter(s => !s.hidden && s.name);
+  if (!items.length) return null;
+  ctx.save();
+  ctx.font = `${Math.round(11 * scale)}px -apple-system, "Segoe UI", Roboto, Arial, sans-serif`;
+  const colW = Math.max(...items.map(s => ctx.measureText(s.name).width), 30 * scale) + 40 * scale;
+  ctx.restore();
+  const cols = Math.max(1, Math.floor(plotW / colW));
+  const rows = Math.ceil(items.length / cols);
+  const lh = 16 * scale;
+  return { items, cols, rows, colW: plotW / cols, lh, height: rows * lh + 12 * scale };
+}
+
+// Render a plot to PNG bytes for the Word report, with the legend below the plot.
+// The canvas grows to fit the legend; returns { data, width, height }.
+export async function plotPng(spec, width = 1600, plotHeight = 760) {
+  const scale = 2.4;
   const c = document.createElement('canvas');
+  const lay = legendLayout(c.getContext('2d'), spec, width - 78 * scale, scale);
+  const height = plotHeight + (lay ? lay.height : 0);
   c.width = width; c.height = height;
-  drawPlot(c.getContext('2d'), width, height, spec, { legend: true, fontScale: 2.4, lineWidth: 1.6 });
+  drawPlot(c.getContext('2d'), width, height, spec, { legend: 'below', fontScale: scale, lineWidth: 0.9 });
   const blob = await new Promise(r => c.toBlob(r, 'image/png'));
-  return new Uint8Array(await blob.arrayBuffer());
+  return { data: new Uint8Array(await blob.arrayBuffer()), width, height };
 }
 
 // Interactive plot: drag to zoom on x, tap/hover for values, legend toggles series.
